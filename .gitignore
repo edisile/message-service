@@ -1,0 +1,12 @@
+.device.ko.cmd
+.device.mod.cmd
+.device.mod.o.cmd
+.device.o.cmd
+device.ko
+device.mod
+device.mod.c
+device.mod.o
+device.o
+Module.symvers
+modules.order
+libs
