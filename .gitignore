@@ -9,4 +9,5 @@ device.mod.o
 device.o
 Module.symvers
 modules.order
-libs
+libs/xxHash
+libs/STUPID_TEST.c
