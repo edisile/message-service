@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <unistd.h>
 
 // Conveniently named wrappers for GCC built-ins
 #define atomic_inc(a) (__sync_fetch_and_add(a, 1))
@@ -66,7 +67,7 @@ struct lf_queue_node *dequeue(struct lf_queue *q) {
 		goto retry;
 	}
 	
-	while (elem->counter > 1); // Busy loop isn't that good but ok
+	while (elem->counter > 1) usleep(100); // Busy loop isn't that good, sleep
 
 	// If someone appends something to this elem while dequeueing the last elem
 	// the list is marked as empty and this is an error:
