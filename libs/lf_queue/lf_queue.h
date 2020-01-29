@@ -18,7 +18,7 @@ struct lf_queue {
 
 
 void enqueue(struct lf_queue *q, struct lf_queue_node *elem) {
-	char res = 0;
+	char ok = 0;
 	struct lf_queue_node *prev;
 
 	elem->counter = 0; // Make sure elem is clean
@@ -30,10 +30,11 @@ void enqueue(struct lf_queue *q, struct lf_queue_node *elem) {
 		atomic_inc(&(q->tail->counter));
 	
 	prev = q->tail;
-	res = atomic_swap(&(q->tail), prev, elem);
-	if (!res) {
+	ok = atomic_swap(&(q->tail), prev, elem);
+	if (!ok) {
 		// Someone else took the last place, retry
-		if (prev != NULL) atomic_dec(&(prev->counter));
+		if (prev != NULL)
+			atomic_dec(&(prev->counter));
 		goto retry;
 	}
 
@@ -51,7 +52,7 @@ void enqueue(struct lf_queue *q, struct lf_queue_node *elem) {
 
 
 struct lf_queue_node *dequeue(struct lf_queue *q) {
-	char res = 0;
+	char ok = 0;
 	struct lf_queue_node *elem;
 
 	retry:
@@ -60,14 +61,21 @@ struct lf_queue_node *dequeue(struct lf_queue *q) {
 	
 	atomic_inc(&(q->head->counter));
 	elem = q->head;
-	res = atomic_swap(&(q->head), elem, elem->next);
-	if (!res) {
+	ok = atomic_swap(&(q->head), elem, elem->next);
+	if (!ok) {
 		// Someone pulled this node already, retry
 		atomic_dec(&(elem->counter));
 		goto retry;
 	}
 	
-	while (elem->counter > 1) usleep(100); // Busy loop isn't that good, sleep
+	int retries = 0;
+	while (elem->counter > 1) {
+		usleep(100); // Give others time to leave this node alone
+		if (++retries > 5) {
+			atomic_dec(&(elem->counter));
+			goto retry;
+		};
+	}
 
 	// If someone appends something to this elem while dequeueing the last elem
 	// the list is marked as empty and this is an error:

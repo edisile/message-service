@@ -61,12 +61,13 @@ int main() {
 
 	for (int i = 0 ; i < 10; i++) {
 		pthread_join(threads[i], NULL);
-		printf("\nended_%d\n", i);
+		//printf("\nended_%d\n", i);
 	}
 
 	while ((node_ptr = dequeue(&queue)) != NULL) {
 		struct data *x = container_of(node_ptr, struct data, node);
 		printf("%d ", x->d);
+		free(x);
 	}
 
 	return EXIT_SUCCESS;
