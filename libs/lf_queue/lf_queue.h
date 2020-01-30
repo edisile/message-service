@@ -20,16 +20,18 @@ struct lf_queue {
 void enqueue(struct lf_queue *q, struct lf_queue_node *elem) {
 	char ok = 0;
 	struct lf_queue_node *prev;
+	prev = NULL;
 
 	elem->counter = 0; // Make sure elem is clean
 	elem->next = NULL;
 
 	retry:
 	// Try to reserve the last place in the list
-	if (q->tail != NULL)
-		atomic_inc(&(q->tail->counter));
+	if (q->tail != NULL) {
+		prev = q->tail;
+		atomic_inc(&(prev->counter));
+	}
 	
-	prev = q->tail;
 	ok = atomic_swap(&(q->tail), prev, elem);
 	if (!ok) {
 		// Someone else took the last place, retry
@@ -59,8 +61,8 @@ struct lf_queue_node *dequeue(struct lf_queue *q) {
 	// Try to hide the head of the queue from anyone else
 	if (q->head == NULL) return NULL; // Empty queue
 	
-	atomic_inc(&(q->head->counter));
 	elem = q->head;
+	atomic_inc(&(elem->counter));
 	ok = atomic_swap(&(q->head), elem, elem->next);
 	if (!ok) {
 		// Someone pulled this node already, retry
@@ -68,13 +70,13 @@ struct lf_queue_node *dequeue(struct lf_queue *q) {
 		goto retry;
 	}
 	
-	int retries = 0;
+	// int retries = 0;
 	while (elem->counter > 1) {
-		usleep(100); // Give others time to leave this node alone
-		if (++retries > 5) {
-			atomic_dec(&(elem->counter));
-			goto retry;
-		};
+		usleep(250); // Give others time to leave this node alone
+		// if (++retries > 5) {
+		// 	atomic_dec(&(elem->counter));
+		// 	goto retry;
+		// };
 	}
 
 	// If someone appends something to this elem while dequeueing the last elem
@@ -84,7 +86,7 @@ struct lf_queue_node *dequeue(struct lf_queue *q) {
 	atomic_swap(&(q->tail), elem, NULL); // elem is the tail? list is empty
 	atomic_swap(&(q->head), NULL, elem->next);
 
-	// Clean elem up and separate from the rest of the list
+	// Clean elem up to separate it from the rest of the list
 	elem->next = NULL;
 	elem->counter = 0;
 

@@ -14,6 +14,9 @@ struct data {
 	struct lf_queue_node node;
 };
 
+struct lf_queue queue;
+int extracted;
+
 void *thread_job(void * arg) {
 	struct lf_queue *queue = (struct lf_queue*) arg;
 	struct lf_queue_node *n;
@@ -36,7 +39,7 @@ void *thread_job(void * arg) {
 			if (n == NULL) continue;
 
 			x = container_of(n, struct data, node);
-			printf("%d ", x->d);
+			printf("%2d ", x->d);
 			free(x);
 		}
 		
@@ -46,16 +49,45 @@ void *thread_job(void * arg) {
 	return NULL;
 }
 
-int main() {
-	struct lf_queue queue;
-	struct lf_queue_node *node_ptr;
+void *thread_job2(void * arg) {
+	struct lf_queue *queue = (struct lf_queue*) arg;
+	struct data *x;
 
-	queue.head = queue.tail = NULL;
+	for (int i = 0; i < 50; i++) {
+		usleep(random() % 100);
+		x = (struct data*) malloc(sizeof(struct data));
+		x->d = i;
+		enqueue(queue, &(x->node));
+	}
 
+	return NULL;
+}
+
+void *thread_job3(void * arg) {
+	struct lf_queue *queue = (struct lf_queue*) arg;
+	struct lf_queue_node *n;
+	struct data *x;
+
+	for (int i = 0; i < 50; i++) {
+		usleep(random() % 100);
+		n = dequeue(queue);
+		if (n == NULL) continue;
+
+		atomic_inc(&extracted);
+		x = container_of(n, struct data, node);
+		printf("%2d ", x->d);
+		free(x);
+	}
+
+	return NULL;
+}
+
+int test1() {
 	pthread_t threads[10];
 
+	// Inserts
 	for (int i = 0 ; i < 10; i++) {
-		if (pthread_create(&threads[i], NULL, thread_job, (void *) &queue))
+		if (pthread_create(&threads[i], NULL, thread_job2, (void *) &queue))
 			return EXIT_FAILURE;
 	}
 
@@ -64,11 +96,62 @@ int main() {
 		//printf("\nended_%d\n", i);
 	}
 
+	int i = 0;
+	for (struct lf_queue_node *n = queue.head; n != NULL; n = n->next) i++;
+
+	printf("%d nodes found\n", i);
+
+	// Removals
+	for (int i = 0 ; i < 10; i++) {
+		if (pthread_create(&threads[i], NULL, thread_job3, (void *) &queue))
+			return EXIT_FAILURE;
+	}
+
+	for (int i = 0 ; i < 10; i++) {
+		pthread_join(threads[i], NULL);
+		//printf("\nended_%d\n", i);
+	}
+
+
+	printf("\nprinting remaining\n");
+	struct lf_queue_node *node_ptr;
 	while ((node_ptr = dequeue(&queue)) != NULL) {
+		atomic_inc(&extracted);
 		struct data *x = container_of(node_ptr, struct data, node);
-		printf("%d ", x->d);
+		printf("%2d ", x->d);
 		free(x);
 	}
 
+	printf("\nExtracted %d\n", extracted);
 	return EXIT_SUCCESS;
+}
+
+int test2() {
+	pthread_t threads[10];
+
+	// Inserts
+	for (int i = 0 ; i < 10; i++) {
+		if (pthread_create(&threads[i], NULL, thread_job, (void *) &queue))
+			return EXIT_FAILURE;
+	}
+
+	for (int i = 0 ; i < 10; i++)
+		pthread_join(threads[i], NULL);
+
+	// printf("\nprinting remaining\n");
+	struct lf_queue_node *node_ptr;
+	while ((node_ptr = dequeue(&queue)) != NULL) {
+		struct data *x = container_of(node_ptr, struct data, node);
+		printf("%2d ", x->d);
+		free(x);
+	}
+
+	printf("\n");
+	return EXIT_SUCCESS;
+}
+
+int main() {
+	queue.head = queue.tail = NULL;
+
+	return test2();
 }
