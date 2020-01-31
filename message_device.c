@@ -41,6 +41,7 @@ static int dev_release(struct inode *inode, struct file *file) {
 
 struct queue_elem {
 	char *message;
+	unsigned long message_len;
 	struct lf_queue_node list;
 };
 
@@ -66,14 +67,16 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 
 	printk("	%lu bytes to write", len);
 	ret = copy_from_user(message, buff, len);
+	elem->message_len = (len - ret);
 	lf_queue_push(&queue, (&(elem->list)));
 	
-	return len - ret;
+	return (len - ret);
 }
 
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
 			loff_t *off) {
 	struct lf_queue_node *node;
+	struct queue_elem *elem;
 	ssize_t ret = 0;
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
@@ -89,10 +92,11 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 	node = lf_queue_pull(&queue);
 
 	if (node != NULL) {
-		struct queue_elem *elem = container_of(node, struct queue_elem, 
+		elem = container_of(node, struct queue_elem, 
 							list);
 
-		ret = copy_to_user(buff, elem->message, len);
+		ret = copy_to_user(buff, elem->message, 
+					min(len, elem->message_len));
 		kfree(elem->message);
 		kfree(elem);
 	}
