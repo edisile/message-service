@@ -25,25 +25,16 @@ static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off);
 
 // Globals
-static DEFINE_MUTEX(device_state);
 static int MAJOR;
 NEW_LF_QUEUE(queue);
 
 // Driver implementation
 static int dev_open(struct inode *inode, struct file *file) {
-	// this device file is single instance
-	if (!mutex_trylock(&device_state)) {
-		return -EBUSY;
-	}
-
 	printk("%s: device file successfully opened\n",MODNAME);
 	return 0;
 }
 
 static int dev_release(struct inode *inode, struct file *file) {
-	// release lock
-	mutex_unlock(&device_state);
-
 	printk("%s: device file closed\n",MODNAME);
 	return 0;
 }
@@ -91,7 +82,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
 	if (elem != NULL) {
 		struct queue_elem *x = container_of(elem, struct queue_elem, list);
 		printk("Read: '%c'", x->c);
-		kfree(elem);
+		kfree(x);
 	}
 
 	return 0;
