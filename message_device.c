@@ -48,7 +48,6 @@ struct queue_elem {
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
 			loff_t *off) {
 	struct queue_elem *elem;
-	char *message;
 	ssize_t ret;
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
@@ -63,10 +62,10 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 
 	// Allocation could block because GFP_KERNEL but it's not a problem
 	elem = kmalloc(sizeof(struct queue_elem), GFP_KERNEL);
-	message = kmalloc(len, GFP_KERNEL);
+	elem->message = kmalloc(len, GFP_KERNEL);
 
 	printk("	%lu bytes to write", len);
-	ret = copy_from_user(message, buff, len);
+	ret = copy_from_user(elem->message, buff, len);
 	elem->message_len = (len - ret);
 	lf_queue_push(&queue, (&(elem->list)));
 	
@@ -78,6 +77,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 	struct lf_queue_node *node;
 	struct queue_elem *elem;
 	ssize_t ret = 0;
+	unsigned long len = 0;
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
 		printk("%s: read on [%d,%d]\n",
@@ -92,16 +92,16 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 	node = lf_queue_pull(&queue);
 
 	if (node != NULL) {
-		elem = container_of(node, struct queue_elem, 
-							list);
+		elem = container_of(node, struct queue_elem, list);
+		len = min(len, elem->message_len);
 
-		ret = copy_to_user(buff, elem->message, 
-					min(len, elem->message_len));
+		ret = copy_to_user(buff, elem->message, len);
 		kfree(elem->message);
 		kfree(elem);
 	}
 
-	return ret;
+	// *off += (len - ret);
+	return (len - ret);
 }
 
 // Driver in a struct
