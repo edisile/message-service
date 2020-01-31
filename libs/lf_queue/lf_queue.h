@@ -27,6 +27,12 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 	char ok = 0;
 	struct lf_queue_node *prev = NULL;
 
+	if (elem == NULL) {
+		// What are you even doing here?
+		printk("lf_queue_push: called with NULL lf_queue_node pointer");
+		return;
+	}
+
 	__cleanup(elem);
 
 	// Try to reserve the last place in the list

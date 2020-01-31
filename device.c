@@ -39,57 +39,68 @@ static int dev_release(struct inode *inode, struct file *file) {
 	return 0;
 }
 
-#define VALID 0
-#define INVALID 1
-
 struct queue_elem {
-	char c;
+	char *message;
 	struct lf_queue_node list;
-	atomic_t state;
 };
 
-static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t *off) {
+static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
+			loff_t *off) {
 	struct queue_elem *elem;
+	char *message;
+	ssize_t ret;
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
-		printk("%s: somebody called a write on dev with [MAJOR,minor] number [%d,%d]\n",
-			MODNAME, MAJOR(filp->f_inode->i_rdev), MINOR(filp->f_inode->i_rdev));
+		printk("%s: write on [%d,%d]\n", MODNAME, 
+			MAJOR(filp->f_inode->i_rdev), 
+			MINOR(filp->f_inode->i_rdev));
 		#else
-		printk("%s: somebody called a write on dev with [MAJOR,minor] number [%d,%d]\n",
-			MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), MINOR(filp->f_dentry->d_inode->i_rdev));
+		printk("%s: write on [%d,%d]\n", MODNAME, 
+			MAJOR(filp->f_dentry->d_inode->i_rdev), 
+			MINOR(filp->f_dentry->d_inode->i_rdev));
 	#endif
 
-	// Allocation can block
-	elem = (struct queue_elem *) kmalloc(sizeof(struct queue_elem), GFP_KERNEL);
-	elem->c = buff[0];
-	atomic_set(&(elem->state), VALID);
+	// Allocation could block because GFP_KERNEL but it's not a problem
+	elem = kmalloc(sizeof(struct queue_elem), GFP_KERNEL);
+	message = kmalloc(len, GFP_KERNEL);
+
+	ret = copy_from_user(message, buff, len);
 	lf_queue_push(&queue, (&(elem->list)));
 	
-	return 1;
+	return ret;
 }
 
-static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) {
-	struct lf_queue_node *elem = lf_queue_pull(&queue);
+static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
+			loff_t *off) {
+	struct lf_queue_node *node;
+	ssize_t ret = 0;
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
-		printk("%s: somebody called a read on dev with [MAJOR,minor] number [%d,%d]\n",
-			MODNAME, MAJOR(filp->f_inode->i_rdev), MINOR(filp->f_inode->i_rdev));
+		printk("%s: read on [%d,%d]\n",
+			MODNAME, MAJOR(filp->f_inode->i_rdev), 
+			MINOR(filp->f_inode->i_rdev));
 		#else
-		printk("%s: somebody called a read on dev with [MAJOR,minor] number [%d,%d]\n",
-			MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), MINOR(filp->f_dentry->d_inode->i_rdev));
+		printk("%s: read on [%d,%d]\n",
+			MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), 
+			MINOR(filp->f_dentry->d_inode->i_rdev));
 	#endif
+	
+	node = lf_queue_pull(&queue);
 
-	if (elem != NULL) {
-		struct queue_elem *x = container_of(elem, struct queue_elem, list);
-		printk("Read: '%c'", x->c);
-		kfree(x);
+	if (node != NULL) {
+		struct queue_elem *elem = container_of(node, struct queue_elem, 
+							list);
+
+		ret = copy_to_user(buff, elem->message, len);
+		kfree(elem->message);
+		kfree(elem);
 	}
 
-	return 0;
+	return ret;
 }
 
 // Driver in a struct
-static struct file_operations fops = {
+static struct file_operations f_ops = {
 	.write = dev_write,
 	.read = dev_read,
 	.open =  dev_open,
@@ -97,25 +108,20 @@ static struct file_operations fops = {
 };
 
 int init_module(void) {
-
-	MAJOR = __register_chrdev(0, 0, 256, DEVICE_NAME, &fops);
+	MAJOR = __register_chrdev(0, 0, 256, DEVICE_NAME, &f_ops);
 
 	if (MAJOR < 0) {
-		printk("%s: registering device failed\n",MODNAME);
+		printk("%s: register failed\n", MODNAME);
 		return MAJOR;
 	}
 
-	printk(KERN_INFO "%s: new device registered, it is assigned MAJOR number %d\n",MODNAME, MAJOR);
-
+	printk(KERN_INFO "%s: registered as %d\n", MODNAME, MAJOR);
 	return 0;
 }
 
 void cleanup_module(void) {
-
 	unregister_chrdev(MAJOR, DEVICE_NAME);
 
-	printk(KERN_INFO "%s: new device unregistered, it was assigned MAJOR number %d\n",MODNAME, MAJOR);
-
+	printk(KERN_INFO "%s: unregistered\n", MODNAME);
 	return;
-
 }
