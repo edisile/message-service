@@ -1,13 +1,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/rculist.h>
-#include <linux/rcupdate.h>
-#include <linux/sched.h>	
-#include <linux/pid.h>
 #include <linux/slab.h>
-#include <linux/tty.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
 
 #include "libs/lf_queue/lf_queue.h"
