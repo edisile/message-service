@@ -92,16 +92,16 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 
 	if (node != NULL) {
 		elem = container_of(node, struct queue_elem, list);
-		len = min(len, elem->message_len - *off);
-
+		len = min(len, elem->message_len);
 		ret = copy_to_user(buff, elem->message + *off, len);
-		*off += (len - ret);
 	
 		kfree(elem->message);
 		kfree(elem);
+	} else {
+		len = 0;
 	}
 
-	return (len - ret);
+	return len;
 }
 
 // Driver in a struct
