@@ -64,10 +64,11 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	elem = kmalloc(sizeof(struct queue_elem), GFP_KERNEL);
 	message = kmalloc(len, GFP_KERNEL);
 
+	printk("	%lu bytes to write", len);
 	ret = copy_from_user(message, buff, len);
 	lf_queue_push(&queue, (&(elem->list)));
 	
-	return ret;
+	return len - ret;
 }
 
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
