@@ -1,7 +1,7 @@
 KERNELDIR=/usr/src/linux
 
-MODULES = device.ko
-obj-m += device.o
+MODULES = message_device.ko
+obj-m += message_device.o
 
 all:
 	make -C $(KERNELDIR) M=$(PWD) modules
