@@ -28,14 +28,14 @@ void *thread_job(void * arg) {
 		float r = (float) random() / RAND_MAX;
 
 		if (r > 0.5) {
-			//printf("enqueue\n");
+			//printf("push\n");
 			x = (struct data*) malloc(sizeof(struct data));
 			x->d = i;
 			i++;
-			enqueue(queue, &(x->node));
+			push(queue, &(x->node));
 		} else {
-			//printf("dequeue\n");
-			n = dequeue(queue);
+			//printf("pull\n");
+			n = pull(queue);
 			if (n == NULL) continue;
 
 			x = container_of(n, struct data, node);
@@ -43,7 +43,7 @@ void *thread_job(void * arg) {
 			free(x);
 		}
 		
-		usleep(random() % 1000);
+		usleep(random() % 500);
 	}
 
 	return NULL;
@@ -57,7 +57,7 @@ void *thread_job2(void * arg) {
 		usleep(random() % 100);
 		x = (struct data*) malloc(sizeof(struct data));
 		x->d = i;
-		enqueue(queue, &(x->node));
+		push(queue, &(x->node));
 	}
 
 	return NULL;
@@ -70,7 +70,7 @@ void *thread_job3(void * arg) {
 
 	for (int i = 0; i < 50; i++) {
 		usleep(random() % 100);
-		n = dequeue(queue);
+		n = pull(queue);
 		if (n == NULL) continue;
 
 		atomic_inc(&extracted);
@@ -115,7 +115,7 @@ int test1() {
 
 	printf("\nprinting remaining\n");
 	struct lf_queue_node *node_ptr;
-	while ((node_ptr = dequeue(&queue)) != NULL) {
+	while ((node_ptr = pull(&queue)) != NULL) {
 		atomic_inc(&extracted);
 		struct data *x = container_of(node_ptr, struct data, node);
 		printf("%2d ", x->d);
@@ -140,7 +140,7 @@ int test2() {
 
 	// printf("\nprinting remaining\n");
 	struct lf_queue_node *node_ptr;
-	while ((node_ptr = dequeue(&queue)) != NULL) {
+	while ((node_ptr = pull(&queue)) != NULL) {
 		struct data *x = container_of(node_ptr, struct data, node);
 		printf("%2d ", x->d);
 		free(x);

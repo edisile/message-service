@@ -1,4 +1,4 @@
-KERNELDIR=/lib/modules/`uname -r`/build
+KERNELDIR=/usr/src/linux
 
 MODULES = device.ko
 obj-m += device.o
