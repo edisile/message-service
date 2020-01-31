@@ -1,8 +1,8 @@
 #include <stddef.h>
 
 // Conveniently named wrappers for GCC built-ins
-#define atomic_inc(a) (__sync_fetch_and_add(a, 1))
-#define atomic_dec(a) (__sync_fetch_and_sub(a, 1))
+#define __atomic_inc(a) (__sync_fetch_and_add(a, 1))
+#define __atomic_dec(a) (__sync_fetch_and_sub(a, 1))
 #define atomic_swap(ptr, old, new) (__sync_bool_compare_and_swap(ptr, old, new))
 
 struct lf_queue_node {
@@ -30,14 +30,14 @@ void push(struct lf_queue *q, struct lf_queue_node *elem) {
 	retry:
 	if (q->tail != NULL) {
 		prev = q->tail;
-		atomic_inc(&(prev->counter));
+		__atomic_inc(&(prev->counter));
 	}
 	
 	ok = atomic_swap(&(q->tail), prev, elem);
 	if (!ok) {
 		// Someone else took the last place, retry
 		if (prev != NULL)
-			atomic_dec(&(prev->counter));
+			__atomic_dec(&(prev->counter));
 		goto retry;
 	}
 
@@ -46,7 +46,7 @@ void push(struct lf_queue *q, struct lf_queue_node *elem) {
 	if (prev != NULL) {
 		// Old tail was a real node, attach elem to it
 		prev->next = elem;
-		atomic_dec(&(prev->counter));
+		__atomic_dec(&(prev->counter));
 	} else {
 		// Old tail was NULL, the queue was empty
 		q->head = elem; // TODO: maybe an atomic store is better?
@@ -63,11 +63,11 @@ struct lf_queue_node *pull(struct lf_queue *q) {
 	if (q->head == NULL) return NULL; // Empty queue
 	
 	elem = q->head;
-	atomic_inc(&(elem->counter));
+	__atomic_inc(&(elem->counter));
 	ok = atomic_swap(&(q->head), elem, elem->next);
 	if (!ok) {
 		// Someone pulled this node already, retry
-		atomic_dec(&(elem->counter));
+		__atomic_dec(&(elem->counter));
 		goto retry;
 	}
 	
