@@ -27,7 +27,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off);
 // Globals
 static DEFINE_MUTEX(device_state);
 static int MAJOR;
-static struct list_head *list = NULL;
+NEW_LF_QUEUE(queue);
 
 // Driver implementation
 static int dev_open(struct inode *inode, struct file *file) {
@@ -35,9 +35,6 @@ static int dev_open(struct inode *inode, struct file *file) {
 	if (!mutex_trylock(&device_state)) {
 		return -EBUSY;
 	}
-
-	// If it's the first time initialize the list
-	if (list == NULL) INIT_LIST_HEAD_RCU(list);
 
 	printk("%s: device file successfully opened\n",MODNAME);
 	return 0;
@@ -56,38 +53,46 @@ static int dev_release(struct inode *inode, struct file *file) {
 
 struct queue_elem {
 	char c;
-	struct list_head list;
+	struct lf_queue_node list;
 	atomic_t state;
 };
 
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t *off) {
 	struct queue_elem *elem;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
-	printk("%s: somebody called a write on dev with [MAJOR,minor] number [%d,%d]\n",
-		MODNAME, MAJOR(filp->f_inode->i_rdev), MINOR(filp->f_inode->i_rdev));
-#else
-	printk("%s: somebody called a write on dev with [MAJOR,minor] number [%d,%d]\n",
-		MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), MINOR(filp->f_dentry->d_inode->i_rdev));
-#endif
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
+		printk("%s: somebody called a write on dev with [MAJOR,minor] number [%d,%d]\n",
+			MODNAME, MAJOR(filp->f_inode->i_rdev), MINOR(filp->f_inode->i_rdev));
+		#else
+		printk("%s: somebody called a write on dev with [MAJOR,minor] number [%d,%d]\n",
+			MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), MINOR(filp->f_dentry->d_inode->i_rdev));
+	#endif
 
 	// Allocation can block
 	elem = (struct queue_elem *) kmalloc(sizeof(struct queue_elem), GFP_KERNEL);
 	elem->c = buff[0];
 	atomic_set(&(elem->state), VALID);
-	list_add_tail_rcu(&(elem->list), list);
+	lf_queue_push(&queue, (&(elem->list)));
 	
 	return 1;
 }
 
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
-	printk("%s: somebody called a read on dev with [MAJOR,minor] number [%d,%d]\n",
-		MODNAME, MAJOR(filp->f_inode->i_rdev), MINOR(filp->f_inode->i_rdev));
-#else
-	printk("%s: somebody called a read on dev with [MAJOR,minor] number [%d,%d]\n",
-		MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), MINOR(filp->f_dentry->d_inode->i_rdev));
-#endif
+	struct lf_queue_node *elem = lf_queue_pull(&queue);
+
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
+		printk("%s: somebody called a read on dev with [MAJOR,minor] number [%d,%d]\n",
+			MODNAME, MAJOR(filp->f_inode->i_rdev), MINOR(filp->f_inode->i_rdev));
+		#else
+		printk("%s: somebody called a read on dev with [MAJOR,minor] number [%d,%d]\n",
+			MODNAME, MAJOR(filp->f_dentry->d_inode->i_rdev), MINOR(filp->f_dentry->d_inode->i_rdev));
+	#endif
+
+	if (elem != NULL) {
+		struct queue_elem *x = container_of(elem, struct queue_elem, list);
+		printk("Read: '%c'", x->c);
+		kfree(elem);
+	}
 
 	return 0;
 }

@@ -4,6 +4,7 @@
 #define __atomic_inc(a) (__sync_fetch_and_add(a, 1))
 #define __atomic_dec(a) (__sync_fetch_and_sub(a, 1))
 #define atomic_swap(ptr, old, new) (__sync_bool_compare_and_swap(ptr, old, new))
+#define NEW_LF_QUEUE(name) struct lf_queue name = {.head = NULL, .tail = NULL}
 
 struct lf_queue_node {
 	struct lf_queue_node *next;
@@ -14,13 +15,15 @@ struct lf_queue {
 	struct lf_queue_node *head, *tail;
 };
 
+
 void __cleanup(struct lf_queue_node *elem) {
 	// Make sure elem is clean
 	elem->counter = 0;
 	elem->next = NULL;
 }
 
-void push(struct lf_queue *q, struct lf_queue_node *elem) {
+
+void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 	char ok = 0;
 	struct lf_queue_node *prev = NULL;
 
@@ -54,7 +57,7 @@ void push(struct lf_queue *q, struct lf_queue_node *elem) {
 }
 
 
-struct lf_queue_node *pull(struct lf_queue *q) {
+struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	char ok = 0;
 	struct lf_queue_node *elem;
 

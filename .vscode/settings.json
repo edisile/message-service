@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "typeinfo": "cpp",
+        "random": "cpp",
+        "tuple": "cpp",
+        "list": "c"
+    }
+}
