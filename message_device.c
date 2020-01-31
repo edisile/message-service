@@ -77,7 +77,6 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 	struct lf_queue_node *node;
 	struct queue_elem *elem;
 	ssize_t ret = 0;
-	unsigned long len = 0;
 
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
 		printk("%s: read on [%d,%d]\n",
@@ -93,14 +92,15 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 
 	if (node != NULL) {
 		elem = container_of(node, struct queue_elem, list);
-		len = min(len, elem->message_len);
+		len = min(len, elem->message_len - *off);
 
-		ret = copy_to_user(buff, elem->message, len);
+		ret = copy_to_user(buff, elem->message + *off, len);
+		*off += (len - ret);
+	
 		kfree(elem->message);
 		kfree(elem);
 	}
 
-	// *off += (len - ret);
 	return (len - ret);
 }
 
