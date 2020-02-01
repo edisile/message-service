@@ -32,12 +32,12 @@ module_param(max_message_size, long, 0660);
 module_param(max_storage_size, long, 0660);
 
 // Driver implementation
-static int dev_open(struct inode *inode, struct file *file) {
-	printk("%s: device file successfully opened\n",MODNAME);
+static int dev_open(struct inode *inode, struct file *filp) {
+	printk("%s: device file opened\n",MODNAME);
 	return 0;
 }
 
-static int dev_release(struct inode *inode, struct file *file) {
+static int dev_release(struct inode *inode, struct file *filp) {
 	printk("%s: device file closed\n",MODNAME);
 	return 0;
 }
@@ -121,7 +121,9 @@ static struct file_operations f_ops = {
 	.write = dev_write,
 	.read = dev_read,
 	.open =  dev_open,
-	.release = dev_release
+	.release = dev_release,
+	.unlocked_ioctl = NULL,
+	.flush = NULL
 };
 
 int init_module(void) {
