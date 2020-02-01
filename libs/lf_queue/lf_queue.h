@@ -4,7 +4,8 @@
 #define __atomic_inc(a) (__sync_fetch_and_add(a, 1))
 #define __atomic_dec(a) (__sync_fetch_and_sub(a, 1))
 #define atomic_swap(ptr, old, new) (__sync_bool_compare_and_swap(ptr, old, new))
-#define NEW_LF_QUEUE(name) struct lf_queue name = {.head = NULL, .tail = NULL}
+#define NEW_LF_QUEUE {.head = NULL, .tail = NULL}
+#define DEFINE_LF_QUEUE(name) struct lf_queue name = NEW_LF_QUEUE
 
 struct lf_queue_node {
 	struct lf_queue_node *next;
@@ -58,7 +59,7 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 		__atomic_dec(&(prev->counter));
 	} else {
 		// Old tail was NULL, the queue was empty
-		q->head = elem; // TODO: maybe an atomic store is better?
+		q->head = elem; // TODO: maybe an atomic set is better?
 	}
 }
 

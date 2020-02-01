@@ -21,7 +21,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off);
 
 // Globals
 static int MAJOR;
-NEW_LF_QUEUE(queue);
+DEFINE_LF_QUEUE(queue);
 
 // Driver implementation
 static int dev_open(struct inode *inode, struct file *file) {
