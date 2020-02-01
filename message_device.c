@@ -33,12 +33,18 @@ module_param(max_storage_size, long, 0660);
 
 // Driver implementation
 static int dev_open(struct inode *inode, struct file *filp) {
-	printk("%s: device file opened\n",MODNAME);
+	printk("%s: device file opened\n", MODNAME);
 	return 0;
 }
 
 static int dev_release(struct inode *inode, struct file *filp) {
-	printk("%s: device file closed\n",MODNAME);
+	// private_data could hold data about the session
+	if (filp->private_data != NULL) {
+		kfree(filp->private_data);
+		filp->private_data = NULL;
+	}
+
+	printk("%s: device file closed\n", MODNAME);
 	return 0;
 }
 
