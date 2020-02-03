@@ -30,7 +30,12 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 
 	if (elem == NULL) {
 		// What are you even doing here?
-		//printf("lf_queue_push: called with NULL lf_queue_node pointer");
+		#ifdef __KERNEL__
+			printk("lf_queue_push: called with NULL lf_queue_node pointer!");
+		#else
+			printf("lf_queue_push: called with NULL lf_queue_node pointer!");
+		#endif
+		
 		return;
 	}
 
