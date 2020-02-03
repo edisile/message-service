@@ -29,6 +29,13 @@ struct queue_elem {
 	struct lf_queue_node list;
 };
 
+// ioctl commands
+enum ioctl_cmds {
+	SET_SEND_TIMEOUT = 99,
+	SET_RECV_TIMEOUT,
+	REVOKE_DELAYED_MESSAGES
+};
+
 // Globals
 static int MAJOR;
 DEFINE_LF_QUEUE(queue);

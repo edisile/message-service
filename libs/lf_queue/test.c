@@ -14,7 +14,7 @@ struct data {
 	struct lf_queue_node node;
 };
 
-NEW_LF_QUEUE(queue);
+DEFINE_LF_QUEUE(queue);
 int extracted;
 
 void *thread_job(void * arg) {
