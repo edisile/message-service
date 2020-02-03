@@ -2,9 +2,9 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 
 #include "libs/lf_queue/lf_queue.h"
 
@@ -29,6 +29,11 @@ struct queue_elem {
 	struct lf_queue_node list;
 };
 
+struct session_data {
+	unsigned long send_timeout, recv_timeout;
+	struct lf_queue queue;
+};
+
 // ioctl commands
 enum ioctl_cmds {
 	SET_SEND_TIMEOUT = 99,
@@ -49,14 +54,17 @@ module_param(max_storage_size, long, 0660);
 
 // Driver implementation
 static int dev_open(struct inode *inode, struct file *filp) {
+	// TODO: increment module usage
 	printk("%s: device file opened\n", MODNAME);
 	return 0;
 }
 
 static int dev_release(struct inode *inode, struct file *filp) {
-	// private_data could hold data about the session
+	// TODO: decrement module usage
+
+	// private_data could contain data about the session
 	if (filp->private_data != NULL) {
-		kfree(filp->private_data);
+		vfree(filp->private_data);
 		filp->private_data = NULL;
 	}
 
@@ -85,9 +93,15 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 		goto exit;
 	}
 
-	// Allocation could block because GFP_KERNEL but it's not a problem
-	elem = kmalloc(sizeof(struct queue_elem), GFP_KERNEL);
-	elem->message = kmalloc(len, GFP_KERNEL);
+	// Allocate memory for the message
+	if ((elem = vmalloc(sizeof(struct queue_elem))))
+		elem->message = vmalloc(len);
+	
+	if (elem == NULL || elem->message == NULL) {
+		// Allocations failed, exit with an error
+		retval = -ENOMEM;
+		goto exit;
+	}
 
 	printk("	%lu bytes to write", len);
 	failed = copy_from_user(elem->message, buff, len);
@@ -125,18 +139,56 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 		copy_to_user(buff, elem->message + *off, len);
 	
 		atomic_sub(elem->mess_len, &stored_bytes); // Space being freed
-		kfree(elem->message);
-		kfree(elem);
+		vfree(elem->message);
+		vfree(elem);
 	}
 
 	return retval;
 }
 
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
-	printk("%s: called with cmd %u and arg %ld", MODNAME, cmd, arg);
-	// TODO: implement for real
+	long retval = 0;
+	struct session_data *s_data;
 
-	return 0;
+	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
+
+	if (cmd == SET_SEND_TIMEOUT || cmd == SET_SEND_TIMEOUT) {
+		retry:
+		if (filp->private_data == NULL) {
+			s_data = vmalloc(sizeof(struct session_data));
+			if (s_data == NULL) {
+				s_data->queue = NEW_LF_QUEUE;
+				filp->private_data = s_data; // TODO: make this with an atomic CAS
+				// if still NULL, change filp->private_data with s_data, else 
+				// dealloc and go to retry just to be sure
+			} else {
+				retval = -ENOMEM;
+				goto exit;
+			}
+		}
+	}
+
+	s_data = filp->private_data;
+
+	switch (cmd) {
+	case SET_SEND_TIMEOUT:
+		s_data->send_timeout = arg;
+		// TODO: find a way to make this timeout a real thing
+		break;
+	case SET_RECV_TIMEOUT:
+		s_data->recv_timeout = arg;
+		// TODO: find a way to make this timeout a real thing
+		break;
+	case REVOKE_DELAYED_MESSAGES:
+		// TODO: implement for real
+		break;
+	default:
+		retval = -EINVAL;
+		goto exit;
+	}
+
+	exit:
+	return retval;
 }
 
 static int dev_flush(struct file *filp, void *id) {

@@ -4,7 +4,7 @@
 #define __atomic_inc(a) (__sync_fetch_and_add(a, 1))
 #define __atomic_dec(a) (__sync_fetch_and_sub(a, 1))
 #define atomic_swap(ptr, old, new) (__sync_bool_compare_and_swap(ptr, old, new))
-#define NEW_LF_QUEUE {.head = NULL, .tail = NULL}
+#define NEW_LF_QUEUE ((struct lf_queue) {.head = NULL, .tail = NULL})
 #define DEFINE_LF_QUEUE(name) struct lf_queue name = NEW_LF_QUEUE
 
 struct lf_queue_node {
