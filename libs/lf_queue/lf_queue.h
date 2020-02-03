@@ -3,7 +3,7 @@
 // Conveniently named wrappers for GCC built-ins
 #define __atomic_inc(a) (__sync_fetch_and_add(a, 1))
 #define __atomic_dec(a) (__sync_fetch_and_sub(a, 1))
-#define atomic_swap(ptr, old, new) (__sync_bool_compare_and_swap(ptr, old, new))
+#define __atomic_swap(ptr, old, new) (__sync_bool_compare_and_swap(ptr, old, new))
 #define NEW_LF_QUEUE ((struct lf_queue) {.head = NULL, .tail = NULL})
 #define DEFINE_LF_QUEUE(name) struct lf_queue name = NEW_LF_QUEUE
 
@@ -25,12 +25,12 @@ void __cleanup(struct lf_queue_node *elem) {
 
 
 void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
-	char ok = 0;
+	int ok = 0;
 	struct lf_queue_node *prev = NULL;
 
 	if (elem == NULL) {
 		// What are you even doing here?
-		printk("lf_queue_push: called with NULL lf_queue_node pointer");
+		//printf("lf_queue_push: called with NULL lf_queue_node pointer");
 		return;
 	}
 
@@ -43,7 +43,7 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 		__atomic_inc(&(prev->counter));
 	}
 	
-	ok = atomic_swap(&(q->tail), prev, elem);
+	ok = __atomic_swap(&(q->tail), prev, elem);
 	if (!ok) {
 		// Someone else took the last place, retry
 		if (prev != NULL)
@@ -59,13 +59,14 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 		__atomic_dec(&(prev->counter));
 	} else {
 		// Old tail was NULL, the queue was empty
-		q->head = elem; // TODO: maybe an atomic set is better?
+		q->head = elem;
+		__sync_synchronize(); // Memory barrier, update is visible immediately
 	}
 }
 
 
 struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
-	char ok = 0;
+	int ok = 0;
 	struct lf_queue_node *elem;
 
 	// Try to hide the head of the queue from anyone else
@@ -74,7 +75,7 @@ struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	
 	elem = q->head;
 	__atomic_inc(&(elem->counter));
-	ok = atomic_swap(&(q->head), elem, elem->next);
+	ok = __atomic_swap(&(q->head), elem, elem->next);
 	if (!ok) {
 		// Someone pulled this node already, retry
 		__atomic_dec(&(elem->counter));
@@ -83,7 +84,7 @@ struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	
 	while (elem->counter > 1) {
 		// usleep(250); // Give others time to leave this node alone
-		// TODO: replace with some wait even queue
+		// TODO: maybe replace with some wait event queue?
 	}
 
 	// If someone appends something to this elem while dequeueing the last elem
@@ -91,8 +92,10 @@ struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	// The state of the list in this situation:
 	// 		tail is neither NULL nor elem (correct)
 	// 		head is NULL (wrong)
-	atomic_swap(&(q->tail), elem, NULL); // elem is the tail? list is empty
-	atomic_swap(&(q->head), NULL, elem->next); // head is NULL? check for pushes
+	// Is elem the tail? Then list is empty
+	__atomic_swap(&(q->tail), elem, NULL);
+	// Is head NULL? Maybe check if someone pushed in the meanwhile
+	__atomic_swap(&(q->head), NULL, elem->next);
 
 	// Clean elem up to separate it from the rest of the list
 	__cleanup(elem);

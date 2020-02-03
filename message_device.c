@@ -1,3 +1,4 @@
+#include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
@@ -54,15 +55,20 @@ module_param(max_storage_size, long, 0660);
 
 // Driver implementation
 static int dev_open(struct inode *inode, struct file *filp) {
-	// TODO: increment module usage
+	// Increment usage count if there's any IO session towards files managed 
+	// by this module
+	if (!try_module_get(THIS_MODULE)) {
+		return -ENODEV; // Module might have been removed
+	}
+
 	printk("%s: device file opened\n", MODNAME);
 	return 0;
 }
 
 static int dev_release(struct inode *inode, struct file *filp) {
-	// TODO: decrement module usage
+	module_put(THIS_MODULE);
 
-	// private_data could contain data about the session
+	// private_data could contain data about the session, free it
 	if (filp->private_data != NULL) {
 		vfree(filp->private_data);
 		filp->private_data = NULL;
@@ -73,7 +79,7 @@ static int dev_release(struct inode *inode, struct file *filp) {
 }
 
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
-			loff_t *off) {
+						loff_t *off) {
 	struct queue_elem *elem;
 	unsigned long failed;
 	ssize_t retval;
@@ -114,7 +120,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 }
 
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
-			loff_t *off) {
+						loff_t *off) {
 	struct lf_queue_node *node;
 	struct queue_elem *elem;
 	ssize_t retval = 0;
@@ -148,19 +154,27 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	long retval = 0;
+	void *res;
 	struct session_data *s_data;
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
-	if (cmd == SET_SEND_TIMEOUT || cmd == SET_SEND_TIMEOUT) {
+
+	if (cmd == SET_SEND_TIMEOUT || cmd == SET_RECV_TIMEOUT) {
 		retry:
 		if (filp->private_data == NULL) {
 			s_data = vmalloc(sizeof(struct session_data));
-			if (s_data == NULL) {
+			if (s_data != NULL) {
 				s_data->queue = NEW_LF_QUEUE;
-				filp->private_data = s_data; // TODO: make this with an atomic CAS
-				// if still NULL, change filp->private_data with s_data, else 
-				// dealloc and go to retry just to be sure
+				
+				// try an atomic CAS on filp->private_data to set it to s_data,  
+				// if it fails dealloc and go to retry just to be sure
+				res = __sync_val_compare_and_swap(&(filp->private_data), 
+												NULL, (void *) s_data);
+				if (res != NULL) {
+					vfree(s_data);
+					goto retry;
+				}
 			} else {
 				retval = -ENOMEM;
 				goto exit;
@@ -173,13 +187,18 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	switch (cmd) {
 	case SET_SEND_TIMEOUT:
 		s_data->send_timeout = arg;
+		__sync_synchronize(); // Memory barrier
+
 		// TODO: find a way to make this timeout a real thing
 		break;
 	case SET_RECV_TIMEOUT:
 		s_data->recv_timeout = arg;
+		__sync_synchronize(); // Memory barrier
+
 		// TODO: find a way to make this timeout a real thing
 		break;
 	case REVOKE_DELAYED_MESSAGES:
+
 		// TODO: implement for real
 		break;
 	default:
