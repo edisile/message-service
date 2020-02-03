@@ -19,6 +19,15 @@ static int dev_open(struct inode *, struct file *);
 static int dev_release(struct inode *, struct file *);
 static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off);
+static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+static int dev_flush(struct file *filp, void *id);
+
+// This will hold the messages in a queue
+struct queue_elem {
+	char *message;
+	unsigned long mess_len;
+	struct lf_queue_node list;
+};
 
 // Globals
 static int MAJOR;
@@ -48,12 +57,6 @@ static int dev_release(struct inode *inode, struct file *filp) {
 	return 0;
 }
 
-struct queue_elem {
-	char *message;
-	unsigned long message_len;
-	struct lf_queue_node list;
-};
-
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
 			loff_t *off) {
 	struct queue_elem *elem;
@@ -81,7 +84,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 
 	printk("	%lu bytes to write", len);
 	failed = copy_from_user(elem->message, buff, len);
-	retval = elem->message_len = len - failed;
+	retval = elem->mess_len = len - failed;
 	lf_queue_push(&queue, (&(elem->list)));
 	atomic_add(retval, &stored_bytes); // Keep track of used space in device
 	
@@ -109,17 +112,31 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 
 	if (node != NULL) {
 		elem = container_of(node, struct queue_elem, list);
-		retval = len = min(len, elem->message_len);
+		retval = len = min(len, elem->mess_len);
 		printk("	%lu bytes to read", len);
 
 		copy_to_user(buff, elem->message + *off, len);
 	
-		atomic_sub(elem->message_len, &stored_bytes); // Space being freed
+		atomic_sub(elem->mess_len, &stored_bytes); // Space being freed
 		kfree(elem->message);
 		kfree(elem);
 	}
 
 	return retval;
+}
+
+static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+	printk("%s: called with cmd %u and arg %ld", MODNAME, cmd, arg);
+	// TODO: implement for real
+
+	return 0;
+}
+
+static int dev_flush(struct file *filp, void *id) {
+	printk("%s: flush requested", MODNAME);
+	// TODO: implement for real
+
+	return 0;
 }
 
 // Driver in a struct
@@ -128,8 +145,8 @@ static struct file_operations f_ops = {
 	.read = dev_read,
 	.open =  dev_open,
 	.release = dev_release,
-	.unlocked_ioctl = NULL,
-	.flush = NULL
+	.unlocked_ioctl = dev_ioctl,
+	.flush = dev_flush
 };
 
 int init_module(void) {
