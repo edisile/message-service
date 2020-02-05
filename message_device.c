@@ -31,7 +31,7 @@ struct queue_elem {
 };
 
 struct session_data {
-	unsigned long send_timeout, recv_timeout;
+	ktime_t send_timeout, recv_timeout;
 	struct lf_queue queue;
 };
 
@@ -105,6 +105,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	
 	if (elem == NULL || elem->message == NULL) {
 		// Allocations failed, exit with an error
+		if (elem != NULL) vfree(elem);
 		retval = -ENOMEM;
 		goto exit;
 	}
@@ -114,6 +115,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	retval = elem->mess_len = len - failed;
 	lf_queue_push(&queue, (&(elem->list)));
 	atomic_add(retval, &stored_bytes); // Keep track of used space in device
+
+	// TODO: call wake_up on the wait queue to wake up one thread
 	
 	exit:
 	return retval;
@@ -159,11 +162,11 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
-
 	if (cmd == SET_SEND_TIMEOUT || cmd == SET_RECV_TIMEOUT) {
 		retry:
 		if (filp->private_data == NULL) {
 			s_data = vmalloc(sizeof(struct session_data));
+
 			if (s_data != NULL) {
 				s_data->queue = NEW_LF_QUEUE;
 				
@@ -186,16 +189,18 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	switch (cmd) {
 	case SET_SEND_TIMEOUT:
-		s_data->send_timeout = arg;
+		s_data->send_timeout = (ktime_t) arg; // Timeout in nanoseconds
 		__sync_synchronize(); // Memory barrier
 
 		// TODO: find a way to make this timeout a real thing
 		break;
 	case SET_RECV_TIMEOUT:
-		s_data->recv_timeout = arg;
+		s_data->recv_timeout = (ktime_t) arg; // Timeout in nanoseconds
 		__sync_synchronize(); // Memory barrier
 
 		// TODO: find a way to make this timeout a real thing
+		// Wait on a wait_queue unique to the file with wait_event_hrtimeout
+		// a wake_up call on the queue wakes up a single thread
 		break;
 	case REVOKE_DELAYED_MESSAGES:
 
@@ -219,6 +224,7 @@ static int dev_flush(struct file *filp, void *id) {
 
 // Driver in a struct
 static struct file_operations f_ops = {
+	.owner = THIS_MODULE,
 	.write = dev_write,
 	.read = dev_read,
 	.open =  dev_open,
