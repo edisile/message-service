@@ -26,6 +26,17 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 static int dev_flush(struct file *filp, void *id);
 
+// Macro to create a struct containing a driver instance
+#define DEFINE_DRIVER_INSTANCE(read_fp, write_fp) ((struct file_operations) { \
+	.owner = THIS_MODULE, \
+	.write = write_fp, \
+	.read = read_fp, \
+	.open =  dev_open, \
+	.release = dev_release, \
+	.unlocked_ioctl = dev_ioctl, \
+	.flush = dev_flush \
+})
+
 // This will hold the messages in a queue
 struct queue_elem {
 	char *message;
@@ -122,7 +133,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	lf_queue_push(&queue, (&(elem->list)));
 	atomic_add(retval, &stored_bytes); // Keep track of used space in device
 
-	// TODO: call wake_up on the wait queue to wake up one thread
+	wake_up(&wait_queue); // wake up one thread on the wait queue
 	
 	exit:
 	return retval;
@@ -174,11 +185,12 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	ktime_t entry_time, wakeup_time, timeout;
 
 	entry_time = wakeup_time = ktime_get();
+	timeout = ((struct session_data *) filp->private_data)->recv_timeout;
 
 	retry:
-	// Compute remaining time to wait in case multiple wake-ups happen
-	timeout = ((struct session_data *) filp->private_data)->recv_timeout - 
-					ktime_sub(wakeup_time, entry_time);
+	// Compute remaining time to wait in case multiple wake-ups happen:
+	// timeout = timeout - (wakeup_time - entry_time)
+	timeout = ktime_sub(timeout, ktime_sub(wakeup_time, entry_time));
 	
 	if (timeout < 0) {
 		// Time's up, return now
@@ -244,13 +256,13 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	switch (cmd) {
 	case SET_SEND_TIMEOUT:
-		s_data->send_timeout = (ktime_t) arg; // Timeout in nanoseconds
+		s_data->send_timeout = ktime_set(0, arg); // Timeout in nanoseconds
 		__sync_synchronize(); // Memory barrier
 
 		// TODO: find a way to make this timeout a real thing
 		break;
 	case SET_RECV_TIMEOUT:
-		s_data->recv_timeout = (ktime_t) arg; // Timeout in nanoseconds
+		s_data->recv_timeout = ktime_set(0, arg); // Timeout in nanoseconds
 		__sync_synchronize(); // Memory barrier
 
 		// TODO: find a way to make this timeout a real thing
@@ -277,19 +289,24 @@ static int dev_flush(struct file *filp, void *id) {
 	return 0;
 }
 
-// Driver in a struct
-static struct file_operations f_ops = {
-	.owner = THIS_MODULE,
-	.write = dev_write,
-	.read = dev_read,
-	.open =  dev_open,
-	.release = dev_release,
-	.unlocked_ioctl = dev_ioctl,
-	.flush = dev_flush
+static struct file_operations f_ops[4] = {
+	DEFINE_DRIVER_INSTANCE(dev_read, dev_write),
+	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write),
+	//DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout),
+	DEFINE_DRIVER_INSTANCE(dev_read, NULL), // Disable and use line above
+	//DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write_timeout),
+	DEFINE_DRIVER_INSTANCE(dev_read_timeout, NULL) // Disable and use line above
+};
+
+enum {
+	R_W = 0, // No-timeout read and write
+	Rt_W, // Read with timeout, normal write
+	R_Wt, // Normal read, delayed write
+	Rt_Wt // Read with timeout, delayed write
 };
 
 int init_module(void) {
-	MAJOR = __register_chrdev(0, 0, 256, DEVICE_NAME, &f_ops);
+	MAJOR = __register_chrdev(0, 0, 256, DEVICE_NAME, &f_ops[R_W]);
 
 	if (MAJOR < 0) {
 		printk(KERN_ERR "%s: register failed with major %d\n", MODNAME, MAJOR);
