@@ -19,7 +19,10 @@ MODULE_LICENSE("GPL");
 static int dev_open(struct inode *, struct file *);
 static int dev_release(struct inode *, struct file *);
 static ssize_t dev_write(struct file *, const char *, size_t, loff_t *);
+static ssize_t dev_write_timeout(struct file *, const char *, size_t, loff_t *);
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off);
+static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len, 
+								loff_t *off);
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 static int dev_flush(struct file *filp, void *id);
 
@@ -44,7 +47,8 @@ enum ioctl_cmds {
 
 // Globals
 static int MAJOR;
-DEFINE_LF_QUEUE(queue);
+static DEFINE_LF_QUEUE(queue);
+static DECLARE_WAIT_QUEUE_HEAD(wait_queue); // replace with init_waitqueue_head to init dynamically
 static long max_message_size = 512;
 static long max_storage_size = 4096;
 static atomic_t stored_bytes = {.counter = 0};
@@ -100,12 +104,14 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	}
 
 	// Allocate memory for the message
-	if ((elem = vmalloc(sizeof(struct queue_elem))))
+	elem = vmalloc(sizeof(struct queue_elem));
+	if (elem != NULL)
 		elem->message = vmalloc(len);
 	
 	if (elem == NULL || elem->message == NULL) {
 		// Allocations failed, exit with an error
 		if (elem != NULL) vfree(elem);
+
 		retval = -ENOMEM;
 		goto exit;
 	}
@@ -122,8 +128,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	return retval;
 }
 
-static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
-						loff_t *off) {
+static ssize_t __read_common(struct file *filp, char *buff, size_t len, 
+							loff_t *off) {
 	struct lf_queue_node *node;
 	struct queue_elem *elem;
 	ssize_t retval = 0;
@@ -152,6 +158,55 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 		vfree(elem);
 	}
 
+	return retval;
+}
+
+static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
+						loff_t *off) {
+	
+	return __read_common(filp, buff, len, off);
+}
+
+static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len, 
+								loff_t *off) {
+	int wait_ret = 0;
+	ssize_t retval = 0;
+	ktime_t entry_time, wakeup_time, timeout;
+
+	entry_time = wakeup_time = ktime_get();
+
+	retry:
+	// Compute remaining time to wait in case multiple wake-ups happen
+	timeout = ((struct session_data *) filp->private_data)->recv_timeout - 
+					ktime_sub(wakeup_time, entry_time);
+	
+	if (timeout < 0) {
+		// Time's up, return now
+		retval = -ETIME;
+		goto exit;
+	}
+
+	if (queue.head == NULL) // 
+		wait_ret = wait_event_hrtimeout(wait_queue, (queue.head != NULL), 
+										timeout);
+
+	if (wait_ret == 0) {
+		// Condition has become true, try to read
+		wakeup_time = ktime_get();
+		retval = __read_common(filp, buff, len, off);
+
+		if (retval != 0)
+			goto exit; // Success, return
+		else
+			goto retry; // Someone else stole the message, try to sleep again
+		
+	} else if (wait_ret == -ETIME) {
+		// Time's up, return now
+		retval = -ETIME;
+		goto exit;
+	}
+
+	exit:
 	return retval;
 }
 
