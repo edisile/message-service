@@ -43,7 +43,7 @@ void *thread_job(void * arg) {
 			free(x);
 		}
 		
-		usleep(random() % 500);
+		usleep(random() % 50);
 	}
 
 	return NULL;
@@ -54,7 +54,7 @@ void *thread_job2(void * arg) {
 	struct data *x;
 
 	for (int i = 0; i < 50; i++) {
-		usleep(random() % 100);
+		usleep(random() % 50);
 		x = (struct data*) malloc(sizeof(struct data));
 		x->d = i;
 		lf_queue_push(queue, &(x->node));
@@ -69,7 +69,7 @@ void *thread_job3(void * arg) {
 	struct data *x;
 
 	for (int i = 0; i < 50; i++) {
-		usleep(random() % 100);
+		usleep(random() % 50);
 		n = lf_queue_pull(queue);
 		if (n == NULL) continue;
 

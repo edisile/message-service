@@ -71,13 +71,14 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 
 
 struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
-	int ok = 0;
+	int ok, head_is_tail;
 	struct lf_queue_node *elem;
 
-	// Try to hide the head of the queue from anyone else
+	// Try to "hide" the head of the queue from anyone else
 	retry:
 	if (q->head == NULL) return NULL; // Empty queue
 	
+	head_is_tail = (q->head == q->tail);
 	elem = q->head;
 	__atomic_inc(&(elem->counter));
 	ok = __atomic_swap(&(q->head), elem, elem->next);
@@ -97,10 +98,12 @@ struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	// The state of the list in this situation:
 	// 		tail is neither NULL nor elem (correct)
 	// 		head is NULL (wrong)
-	// Is elem the tail? Then list is empty
-	__atomic_swap(&(q->tail), elem, NULL);
-	// Is head NULL? Maybe check if someone pushed in the meanwhile
-	__atomic_swap(&(q->head), NULL, elem->next);
+	if (head_is_tail) {
+		// Is elem the tail? Then list is empty
+		__atomic_swap(&(q->tail), elem, NULL);
+		// Is head NULL? Check if someone pushed in the meantime
+		__atomic_swap(&(q->head), NULL, elem->next);
+	}
 
 	// Clean elem up to separate it from the rest of the list
 	__cleanup(elem);
