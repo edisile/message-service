@@ -49,7 +49,8 @@ struct queue_elem {
 // Data related to a single I/O session, will be stored in the private_data 
 // pointer of the file struct
 struct session_data {
-	ktime_t send_timeout, recv_timeout;
+	unsigned long send_timeout;
+	ktime_t recv_timeout;
 	struct lf_queue queue;
 	struct mutex metadata_lock;
 };
@@ -59,6 +60,13 @@ struct file_data {
 	struct lf_queue message_queue;
 	atomic_t stored_bytes;
 	struct wait_queue_head wait_queue;
+};
+
+// Used to store data necessary for the delayed write mechanism
+struct delayed_write_data {
+	struct delayed_work dwork;
+	struct queue_elem *elem;
+	struct file_data *file;
 };
 
 // ioctl commands
@@ -99,11 +107,11 @@ module_param(max_storage_size, long, 0660);
 // these driver instances
 static struct file_operations f_ops[4] = {
 	// No-timeout read and write
-	DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout), // TODO: RESTORE THE ORDER HERE!
 	DEFINE_DRIVER_INSTANCE(dev_read, dev_write),
 	// Read with timeout, normal write
 	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write),
 	// Normal read, delayed write
+	DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout),
 	// Read with timeout, delayed write
 	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write_timeout)
 };
@@ -211,19 +219,28 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 }
 
 static void __delayed_work(struct work_struct *work) {
-	struct delayed_work *dwork;
+	struct delayed_work *d_work;
+	struct delayed_write_data *data;
 
-	dwork = container_of(work, struct delayed_work, work);
-	printk("%s: delayed func call, %p\n", MODNAME, dwork);
+	d_work = container_of(work, struct delayed_work, work);
+	data = container_of(d_work, struct delayed_write_data, dwork);
 
-	vfree(dwork);
+	printk("%s: delayed func call, data at 0x%p\n", MODNAME, data);
+
+	// TODO: check if push was aborted in the meantime
+	__push_to_queue(data->file, data->elem);
+
+	printk("%s: delayed func call succedeed, 0x%p\n", MODNAME, data);
+
+	vfree(data);
 }
 
 static ssize_t dev_write_timeout(struct file *filp, const char *buff, 
 								size_t len, loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
 	struct queue_elem *elem;
-	struct delayed_work *dwork;
+	struct delayed_write_data *data = NULL;
+	unsigned long delay;
 	bool ok;
 	ssize_t retval;
 
@@ -232,33 +249,31 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	retval = __write_common(d, buff, len, &elem);
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
-	// TODO: Start delayed work here
-	dwork = vmalloc(sizeof(struct delayed_work));
-	
-	if (dwork == NULL) {
+	data = vmalloc(sizeof(struct delayed_write_data));
+	if (data == NULL) {
 		retval = -ENOMEM;
 		goto cleanup;
 	}
 
-	INIT_DELAYED_WORK(dwork, __delayed_work);
+	data->elem = elem;
+	data->file = d;
+	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
 
-	ok = queue_delayed_work(work_queue, dwork, 1000);
+	delay = ((struct session_data *) filp->private_data)->send_timeout;
+	ok = queue_delayed_work(work_queue, &(data->dwork), delay);
 	if (!ok) {
 		retval = -EAGAIN;
 		goto cleanup;
 	}
-	printk("%s: work enqueued, %p\n", MODNAME, dwork);
-	// For the moment just deallocate message and elem
-	vfree(elem->message); vfree(elem);
+	printk("%s: work enqueued, 0x%p\n", MODNAME, data);
 
 	exit:
 	return retval;
 
 	cleanup:
-	if (dwork != NULL) vfree(dwork);
+	if (data != NULL) vfree(data);
 	vfree(elem->message);
 	vfree(elem);
-
 	return retval;
 }
 
@@ -408,7 +423,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		mutex_lock(&(s_data->metadata_lock));
 
 		if (cmd == SET_SEND_TIMEOUT)
-			s_data->send_timeout = ktime_set(0, arg);
+			s_data->send_timeout = arg;
 		else
 			s_data->recv_timeout = ktime_set(0, arg);
 		
@@ -478,7 +493,14 @@ int init_module(void) {
 void cleanup_module(void) {
 	int i;
 
+	// TODO: first set all delayed work to dump their messages
+	// Flush all work in the queue before destroying it
+	printk(KERN_INFO "%s: flushing work queue\n", MODNAME);
+	flush_workqueue(work_queue);
+	destroy_workqueue(work_queue);
+
 	unregister_chrdev(MAJOR, DEVICE_NAME);
+	printk(KERN_INFO "%s: unregistered\n", MODNAME);
 
 	for (i = 0; i < MINORS; i++) {
 		printk(KERN_INFO "%s: cleaning device #%d\n", MODNAME, i);
@@ -488,6 +510,5 @@ void cleanup_module(void) {
 		while (__read_common(&files[i], NULL, 1, NULL) > 0);
 	}
 
-	printk(KERN_INFO "%s: unregistered\n", MODNAME);
 	return;
 }
