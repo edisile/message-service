@@ -41,7 +41,7 @@ static int dev_flush(struct file *filp, void *id);
 
 // This will hold the messages in a queue
 struct queue_elem {
-	char *message;
+	unsigned char *message;
 	unsigned long mess_len;
 	struct lf_queue_node list;
 };
@@ -102,11 +102,9 @@ static struct file_operations f_ops[4] = {
 	// Read with timeout, normal write
 	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write),
 	// Normal read, delayed write
-		//DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout),
-	DEFINE_DRIVER_INSTANCE(dev_read, NULL), // TODO: Disable and use line above
+	DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout),
 	// Read with timeout, delayed write
-		//DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write_timeout),
-	DEFINE_DRIVER_INSTANCE(dev_read_timeout, NULL) // TODO: Disable and use line above
+	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write_timeout)
 };
 
 // Possibile indices for f_ops table
@@ -127,11 +125,11 @@ enum driver_mode {
 static int dev_open(struct inode *inode, struct file *filp) {
 	int retval = 0;
 
-	if (__MINOR(filp) >= MINORS) {
-		// Minor number not supported
-		retval = -ENODEV;
-		goto exit;
-	}
+	// if (__MINOR(filp) >= MINORS) {
+	// 	// Minor number not supported
+	// 	retval = -ENODEV;
+	// 	goto exit;
+	// }
 
 	// Increment usage count if there's any IO session towards files managed 
 	// by this module
@@ -149,7 +147,7 @@ static int dev_open(struct inode *inode, struct file *filp) {
 
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
-	module_put(THIS_MODULE);
+	// module_put(THIS_MODULE);
 
 	// private_data could contain data about the session, free it
 	if (filp->private_data != NULL) {
@@ -161,42 +159,75 @@ static int dev_release(struct inode *inode, struct file *filp) {
 	return 0;
 }
 
-// Posts a message on the message queue
-static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
-						loff_t *off) {
-	struct file_data *d = &files[__MINOR(filp)];
-	struct queue_elem *elem;
-	unsigned long failed;
+// Stores len bytes (or less) of the message provided in buff inside a 
+// queue_elem whose address is placed at elem_addr
+static ssize_t __write_common(struct file_data *d, const char *buff, size_t len, 
+							struct queue_elem **elem_addr) {
 	ssize_t retval;
-
-	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
-
+	unsigned long failed;
+	
 	if (len > min(max_message_size, max_storage_size - d->stored_bytes.counter)) {
 		retval = -ENOSPC;
 		goto exit;
 	}
 
 	// Allocate memory for the message
-	elem = vmalloc(sizeof(struct queue_elem));
-	if (elem != NULL)
-		elem->message = vmalloc(len);
+	*elem_addr = vmalloc(sizeof(struct queue_elem));
+	if (elem_addr != NULL)
+		(*elem_addr)->message = vmalloc(len);
 	
-	if (elem == NULL || elem->message == NULL) {
+	if (*elem_addr == NULL || (*elem_addr)->message == NULL) {
 		// Allocations failed, exit with an error
-		if (elem != NULL) vfree(elem);
+		if (*elem_addr != NULL) vfree(*elem_addr);
 
 		retval = -ENOMEM;
 		goto exit;
 	}
 
 	printk("	%lu bytes to write", len);
-	failed = copy_from_user(elem->message, buff, len);
-	retval = elem->mess_len = len - failed;
-	lf_queue_push(&(d->message_queue), &(elem->list));
+	failed = copy_from_user((*elem_addr)->message, buff, len);
+	retval = (*elem_addr)->mess_len = len - failed;
 	atomic_add(retval, &(d->stored_bytes)); // Keep track of used space in device
+
+	exit:
+	return retval;
+}
+
+// Posts a message on the message queue
+static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
+						loff_t *off) {
+	struct file_data *d = &files[__MINOR(filp)];
+	struct queue_elem *elem;
+	ssize_t retval;
+
+	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
+
+	retval = __write_common(d, buff, len, &elem);
+	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
+
+	lf_queue_push(&(d->message_queue), &(elem->list));
 
 	wake_up(&(d->wait_queue)); // Wake up one thread on the wait queue
 	
+	exit:
+	return retval;
+}
+
+static ssize_t dev_write_timeout(struct file *filp, const char *buff, 
+								size_t len, loff_t *off) {
+	struct file_data *d = &files[__MINOR(filp)];
+	struct queue_elem *elem;
+	ssize_t retval;
+
+	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
+
+	retval = __write_common(d, buff, len, &elem);
+	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
+
+	// TODO: Start delayed work here
+	// For the moment just deallocate message and elem
+	vfree(elem->message); vfree(elem);
+
 	exit:
 	return retval;
 }
@@ -240,7 +271,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 // to the I/O session
 // Threads will wait on a wait_queue dedicated to the file using 
 // wait_event_hrtimeout; a wake_up call on the queue will wake up a single 
-// thread
+// thread every time a new message is added
 static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len, 
 								loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
@@ -333,9 +364,11 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	if (filp->private_data == NULL) {
 		retval = __alloc_session_data(filp);
-		if (retval != 0)
+		if (retval != 0) {
+			printk("%s: ioctl failed", MODNAME);
 			goto exit;
-	}
+		}
+	} 
 
 	s_data = (struct session_data *) filp->private_data;
 
@@ -375,7 +408,7 @@ static int dev_flush(struct file *filp, void *id) {
 
 int init_module(void) {
 	int i;
-	MAJOR = __register_chrdev(0, 0, 256, DEVICE_NAME, &f_ops[R_W]);
+	MAJOR = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &f_ops[R_W]);
 
 	if (MAJOR < 0) {
 		printk(KERN_ERR "%s: register failed with major %d\n", MODNAME, MAJOR);
@@ -399,7 +432,6 @@ int init_module(void) {
 
 void cleanup_module(void) {
 	int i;
-	ssize_t read_ret = 0;
 
 	unregister_chrdev(MAJOR, DEVICE_NAME);
 
