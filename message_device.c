@@ -76,6 +76,7 @@ static int MAJOR;
 static long max_message_size = 512;
 static long max_storage_size = 4096;
 static struct file_data files[MINORS];
+static struct workqueue_struct *work_queue;
 
 // Module parameters exposed via the /sys/ pseudo-fs
 module_param(max_message_size, long, 0660);
@@ -98,11 +99,11 @@ module_param(max_storage_size, long, 0660);
 // these driver instances
 static struct file_operations f_ops[4] = {
 	// No-timeout read and write
+	DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout), // TODO: RESTORE THE ORDER HERE!
 	DEFINE_DRIVER_INSTANCE(dev_read, dev_write),
 	// Read with timeout, normal write
 	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write),
 	// Normal read, delayed write
-	DEFINE_DRIVER_INSTANCE(dev_read, dev_write_timeout),
 	// Read with timeout, delayed write
 	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write_timeout)
 };
@@ -139,7 +140,7 @@ static int dev_open(struct inode *inode, struct file *filp) {
 
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
-	// module_put(THIS_MODULE);
+	module_put(THIS_MODULE);
 
 	// private_data could contain data about the session, free it
 	if (filp->private_data != NULL) {
@@ -209,10 +210,21 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	return retval;
 }
 
+static void __delayed_work(struct work_struct *work) {
+	struct delayed_work *dwork;
+
+	dwork = container_of(work, struct delayed_work, work);
+	printk("%s: delayed func call, %p\n", MODNAME, dwork);
+
+	vfree(dwork);
+}
+
 static ssize_t dev_write_timeout(struct file *filp, const char *buff, 
 								size_t len, loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
 	struct queue_elem *elem;
+	struct delayed_work *dwork;
+	bool ok;
 	ssize_t retval;
 
 	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
@@ -221,10 +233,32 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
 	// TODO: Start delayed work here
+	dwork = vmalloc(sizeof(struct delayed_work));
+	
+	if (dwork == NULL) {
+		retval = -ENOMEM;
+		goto cleanup;
+	}
+
+	INIT_DELAYED_WORK(dwork, __delayed_work);
+
+	ok = queue_delayed_work(work_queue, dwork, 1000);
+	if (!ok) {
+		retval = -EAGAIN;
+		goto cleanup;
+	}
+	printk("%s: work enqueued, %p\n", MODNAME, dwork);
 	// For the moment just deallocate message and elem
 	vfree(elem->message); vfree(elem);
 
 	exit:
+	return retval;
+
+	cleanup:
+	if (dwork != NULL) vfree(dwork);
+	vfree(elem->message);
+	vfree(elem);
+
 	return retval;
 }
 
@@ -403,17 +437,29 @@ static int dev_flush(struct file *filp, void *id) {
 }
 
 int init_module(void) {
+	int retval = 0;
 	int i;
-	MAJOR = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &f_ops[0]);
 	// By default the driver for the device is f_ops[0] that points to the 
 	// non-delayed read / write implementations
+	struct file_operations *f_op = &f_ops[0];
+
+	MAJOR = __register_chrdev(0, 0, MINORS, DEVICE_NAME, f_op);
 
 	if (MAJOR < 0) {
 		printk(KERN_ERR "%s: register failed with major %d\n", MODNAME, MAJOR);
-		return MAJOR;
+		retval = MAJOR;
+		goto exit;
 	}
 
 	printk(KERN_INFO "%s: registered as %d\n", MODNAME, MAJOR);
+
+	work_queue = alloc_workqueue("delayed_queue", WQ_UNBOUND, 0);
+	if (work_queue == NULL) {
+		// Work queue was not allocated due to kzalloc failure, return with a 
+		// "no memory" error
+		retval = -ENOMEM;
+		goto exit;
+	}
 
 	// Initialize the data struct for all possible file instances
 	for (i = 0; i < MINORS; i++) {
@@ -425,7 +471,8 @@ int init_module(void) {
 		init_waitqueue_head(&(files[i].wait_queue));
 	}
 
-	return 0;
+	exit:
+	return retval;
 }
 
 void cleanup_module(void) {
