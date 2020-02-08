@@ -107,16 +107,8 @@ static struct file_operations f_ops[4] = {
 	DEFINE_DRIVER_INSTANCE(dev_read_timeout, dev_write_timeout)
 };
 
-// Possibile indices for f_ops table
-enum driver_mode {
-	R_W = 0,	// No-timeout read and write
-	Rt_W,		// Read with timeout, normal write
-	R_Wt,		// Normal read, delayed write
-	Rt_Wt		// Read with timeout, delayed write
-};
-
 // Get the index of the correct driver based on send and receive timeout values
-#define DRIVER_INDEX(st, rt) ((enum driver_mode) ((rt ? 0x1 : 0) | (st ? 0x2 : 0)))
+#define DRIVER_INDEX(st, rt) (((rt ? 0x1 : 0) | (st ? 0x2 : 0)))
 
 
 // Driver implementation
@@ -408,7 +400,9 @@ static int dev_flush(struct file *filp, void *id) {
 
 int init_module(void) {
 	int i;
-	MAJOR = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &f_ops[R_W]);
+	MAJOR = __register_chrdev(0, 0, MINORS, DEVICE_NAME, &f_ops[0]);
+	// By default the driver for the device is f_ops[0] that points to the 
+	// non-delayed read / write implementations
 
 	if (MAJOR < 0) {
 		printk(KERN_ERR "%s: register failed with major %d\n", MODNAME, MAJOR);
