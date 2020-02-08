@@ -132,6 +132,7 @@ static int dev_open(struct inode *inode, struct file *filp) {
 	// 	goto exit;
 	// }
 
+	// MAYBE: remove
 	// Increment usage count if there's any IO session towards files managed 
 	// by this module
 	if (!try_module_get(THIS_MODULE)) {
@@ -148,8 +149,9 @@ static int dev_open(struct inode *inode, struct file *filp) {
 
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
-	module_put(THIS_MODULE);
+	module_put(THIS_MODULE); // MAYBE: remove
 
+	// 
 	// private_data could contain data about the session, free it
 	if (filp->private_data != NULL) {
 		vfree(filp->private_data);
@@ -228,7 +230,10 @@ static void __delayed_work(struct work_struct *work) {
 	printk("%s: delayed func call, data at 0x%p\n", MODNAME, data);
 
 	// TODO: check if push was aborted in the meantime
+	// if (do push)
 	__push_to_queue(data->file, data->elem);
+	// else
+	// vfree(elem->message); vfree(elem);
 
 	printk("%s: delayed func call succedeed, 0x%p\n", MODNAME, data);
 
@@ -499,7 +504,7 @@ void cleanup_module(void) {
 	flush_workqueue(work_queue);
 	destroy_workqueue(work_queue);
 
-	unregister_chrdev(MAJOR, DEVICE_NAME);
+	__unregister_chrdev(MAJOR, 0, MINORS, DEVICE_NAME);
 	printk(KERN_INFO "%s: unregistered\n", MODNAME);
 
 	for (i = 0; i < MINORS; i++) {
