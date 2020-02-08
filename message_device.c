@@ -185,6 +185,12 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	return retval;
 }
 
+// Common implementation for pushing messages to the queue of a file
+static void inline __push_to_queue(struct file_data *d, struct queue_elem *e) {
+	lf_queue_push(&(d->message_queue), &(e->list));
+	wake_up(&(d->wait_queue)); // Wake up one thread on the wait queue
+}
+
 // Posts a message on the message queue
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
 						loff_t *off) {
@@ -197,9 +203,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	retval = __write_common(d, buff, len, &elem);
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
-	lf_queue_push(&(d->message_queue), &(elem->list));
-
-	wake_up(&(d->wait_queue)); // Wake up one thread on the wait queue
+	__push_to_queue(d, elem);
 	
 	exit:
 	return retval;
