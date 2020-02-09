@@ -237,6 +237,7 @@ static void __delayed_work(struct work_struct *work) {
 	printk("%s: delayed func call\n", MODNAME);
 
 	// Check if push was aborted in the meantime
+	printk("%s: status at index %ld", MODNAME, data->delay_status_ind);
 	if (is_enabled(&(data->file->delays), data->delay_status_ind)) {
 		__push_to_queue(data->file, data->elem);
 		printk("%s: delayed push success\n", MODNAME);
@@ -277,12 +278,11 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	if (s_data->delay_status_ind == -1 || 
 		is_disabled(&(d->delays), s_data->delay_status_ind)) {
 		// Delayed push is not enabled for this elem anymore, get a new one
-		printk("%s: requesting new delay status\n", MODNAME);
 		s_data->delay_status_ind = get_free(&(d->delays));
+		printk("%s: requesting new delay status, got index %ld, %p\n", MODNAME, s_data->delay_status_ind, &(s_data->delay_status_ind));
 
 		if (s_data->delay_status_ind == -1) {
 			retval = -ENOMEM;
-
 		}
 	}
 
@@ -407,7 +407,9 @@ static long __alloc_session_data(struct file *filp) {
 
 		if (s_data != NULL) {
 			s_data->queue = NEW_LF_QUEUE;
-			s_data->recv_timeout = s_data->send_timeout = ktime_set(0, 0);
+			s_data->recv_timeout = ktime_set(0, 0);
+			s_data->send_timeout = 0;
+			s_data->delay_status_ind = -1;
 			mutex_init(&(s_data->metadata_lock));
 			
 			// try an atomic CAS on filp->private_data to set it to s_data,  
@@ -464,6 +466,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		break;
 	case REVOKE_DELAYED_MESSAGES:
 		// Set the delayed messages not yet pushed to the queue to be dumped
+		printk("%s: disabling index %ld, %p", MODNAME, s_data->delay_status_ind, &(s_data->delay_status_ind));
 		put_used(&(d->delays), s_data->delay_status_ind);
 		break;
 	default:

@@ -44,8 +44,7 @@ static void put_used(struct ring_bitmask *rb, long i) {
 }
 
 static void free_unused(struct ring_bitmask *rb) {
-	while ((rb->used <= rb->free) && is_disabled(rb, rb->used)) {
-		__put_used(rb, rb->used);
+	while ((rb->used < rb->free) && is_disabled(rb, rb->used)) {
 		__atomic_add(&(rb->used), 1);
 	}
 }
@@ -53,8 +52,8 @@ static void free_unused(struct ring_bitmask *rb) {
 static long put_all(struct ring_bitmask *rb) {
 	long i = -1;
 
-	while (rb->used <= rb->free) {
-		put_used(rb, rb->used);
+	while (rb->used < rb->free) {
+		__put_used(rb, rb->used);
 		i = __atomic_add(&(rb->used), 1);
 	}
 
