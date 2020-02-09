@@ -54,7 +54,7 @@ struct session_data {
 	ktime_t recv_timeout;
 	struct lf_queue queue;
 	struct mutex metadata_lock;
-	atomic_t delayed_status_ind; // Index of a delayed write status
+	long delay_status_ind; // Index of a delayed write status
 };
 
 // Data related to a single instance of the file
@@ -70,6 +70,7 @@ struct delayed_write_data {
 	struct delayed_work dwork;
 	struct queue_elem *elem;
 	struct file_data *file;
+	long delay_status_ind;
 };
 
 // ioctl commands
@@ -230,25 +231,27 @@ static void __delayed_work(struct work_struct *work) {
 	d_work = container_of(work, struct delayed_work, work);
 	data = container_of(d_work, struct delayed_write_data, dwork);
 
-	printk("%s: delayed func call, data at 0x%p\n", MODNAME, data);
+	printk("%s: delayed func call\n", MODNAME);
 
-	// TODO: check if push was aborted in the meantime
-	// if (do push)
-	__push_to_queue(data->file, data->elem);
-	// else
-	// vfree(elem->message); vfree(elem);
+	// Check if push was aborted in the meantime
+	if (is_enabled(&(data->file->delays), data->delay_status_ind)) {
+		__push_to_queue(data->file, data->elem);
+		printk("%s: delayed push success\n", MODNAME);
+	} else {
+		printk("%s: delayed push aborted\n", MODNAME);
+		vfree(data->elem->message);
+		vfree(data->elem);
+	}
 
-	printk("%s: delayed func call succedeed, 0x%p\n", MODNAME, data);
-
-	vfree(data);
+	vfree(data); 
 }
 
 static ssize_t dev_write_timeout(struct file *filp, const char *buff, 
 								size_t len, loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
+	struct session_data *s_data =  (struct session_data *) filp->private_data;
 	struct queue_elem *elem;
 	struct delayed_write_data *data = NULL;
-	unsigned long delay;
 	bool ok;
 	ssize_t retval;
 
@@ -265,10 +268,23 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 
 	data->elem = elem;
 	data->file = d;
+
+	if (s_data->delay_status_ind == -1 || 
+		is_disabled(&(d->delays), s_data->delay_status_ind)) {
+		// Delayed push is not enabled for this elem anymore, get a new one
+		printk("%s: requesting new delay status\n", MODNAME);
+		s_data->delay_status_ind = get_free(&(d->delays));
+
+		if (s_data->delay_status_ind == -1) {
+			retval = -ENOMEM;
+
+		}
+	}
+
+	data->delay_status_ind = s_data->delay_status_ind;
 	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
 
-	delay = ((struct session_data *) filp->private_data)->send_timeout;
-	ok = queue_delayed_work(work_queue, &(data->dwork), delay);
+	ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
 	if (!ok) {
 		retval = -EAGAIN;
 		goto cleanup;
@@ -412,6 +428,7 @@ static long __alloc_session_data(struct file *filp) {
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	long retval = 0;
 	struct session_data *s_data;
+	struct file_data *d = &files[__MINOR(filp)];
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
@@ -441,7 +458,8 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		mutex_unlock(&(s_data->metadata_lock));
 		break;
 	case REVOKE_DELAYED_MESSAGES:
-		// TODO: implement for real
+		// Set the delayed messages not yet pushed to the queue to be dumped
+		put_used(&(d->delays), s_data->delay_status_ind);
 		break;
 	default:
 		retval = -EINVAL;
@@ -452,10 +470,19 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	return retval;
 }
 
-static int dev_flush(struct file *filp, void *id) {
-	printk("%s: flush requested", MODNAME);
-	// TODO: implement for real
+// Real flush implementation, just set all the delayed operations' status to 
+// disabled; when they will execute their messages won't be pushed to the queue
+static void __flush(struct file_data *d) {
+	wake_up_all(&(d->wait_queue));
+	put_all(&(d->delays));
+}
 
+// Revoke all messages not yet pushed to the queue and wake up all waiting 
+// readers; the exported VFS operation is just an wrapper for __flush
+static int dev_flush(struct file *filp, void *id) {
+	printk("%s: flush requested on [%d,%d]", MODNAME, MAJOR, __MINOR(filp));
+	__flush(&files[__MINOR(filp)]);
+	
 	return 0;
 }
 
@@ -474,7 +501,7 @@ int init_module(void) {
 		goto exit;
 	}
 
-	printk(KERN_INFO "%s: registered as %d\n", MODNAME, MAJOR);
+	printk("%s: registered as %d\n", MODNAME, MAJOR);
 
 	work_queue = alloc_workqueue("delayed_queue", WQ_UNBOUND, 0);
 	if (work_queue == NULL) {
@@ -502,20 +529,24 @@ int init_module(void) {
 void cleanup_module(void) {
 	int i;
 
-	// TODO: first set all delayed work to dump their messages
+	// Flush all files; sets all delayed work to dump their messages and wakes 
+	// up any readers that are still waiting
+	for (i = 0; i < MINORS; i++) {
+		__flush(&(files[i]));
+	}
+
 	// Flush all work in the queue before destroying it
-	printk(KERN_INFO "%s: flushing work queue\n", MODNAME);
+	printk("%s: flushing work queue\n", MODNAME);
 	flush_workqueue(work_queue);
 	destroy_workqueue(work_queue);
 
 	__unregister_chrdev(MAJOR, 0, MINORS, DEVICE_NAME);
-	printk(KERN_INFO "%s: unregistered\n", MODNAME);
+	printk("%s: unregistered\n", MODNAME);
 
 	for (i = 0; i < MINORS; i++) {
-		printk(KERN_INFO "%s: cleaning device #%d\n", MODNAME, i);
-		wake_up_all(&(files[i].wait_queue));
-
-		// calling __read_common with buff == NULL just dumps the message
+		printk("%s: cleaning device #%d\n", MODNAME, i);
+		// calling __read_common with buff == NULL just dumps the message from 
+		// the queue
 		while (__read_common(&files[i], NULL, 1, NULL) > 0);
 	}
 
