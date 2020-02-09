@@ -14,14 +14,14 @@ struct lf_queue {
 };
 
 
-void __cleanup(struct lf_queue_node *elem) {
+static void __cleanup(struct lf_queue_node *elem) {
 	// Make sure elem is clean
 	elem->counter = 0;
 	elem->next = NULL;
 }
 
 
-void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
+static void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 	int ok = 0;
 	struct lf_queue_node *prev = NULL;
 
@@ -67,7 +67,7 @@ void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 }
 
 
-struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
+static struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	int ok, head_is_tail;
 	struct lf_queue_node *elem;
 

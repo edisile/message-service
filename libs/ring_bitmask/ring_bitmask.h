@@ -13,45 +13,50 @@ struct ring_bitmask {
 	long free, used; // Indices for the ring
 };
 
-long get_free(struct ring_bitmask *rb);
-void free_unused(struct ring_bitmask *rb);
-void put_used(struct ring_bitmask *rb, long i);
-void free_unused(struct ring_bitmask *rb);
-long put_all(struct ring_bitmask *rb);
+static long get_free(struct ring_bitmask *rb);
+static void free_unused(struct ring_bitmask *rb);
+static void put_used(struct ring_bitmask *rb, long i);
+static void free_unused(struct ring_bitmask *rb);
+static long put_all(struct ring_bitmask *rb);
 
-long get_free(struct ring_bitmask *rb) {
-    long i = -1;
+static long get_free(struct ring_bitmask *rb) {
+	long i = -1;
 
-    if (rb->free < rb->used + BITMASK_LEN) {
-        // There are still free elements
-        i = __atomic_add(&(rb->free), 1);
-        __atomic_inc(&(rb->status[i % BITMASK_LEN]));
-    }
+	if (rb->free < rb->used + BITMASK_LEN) {
+		// There are still free elements
+		i = __atomic_add(&(rb->free), 1);
+		__atomic_inc(&(rb->status[i % BITMASK_LEN]));
+	}
 
-    return i;
+	return i;
 }
 
-void put_used(struct ring_bitmask *rb, long i) {
-    if (is_enabled(rb, i))
-        __atomic_dec(&(rb->status[i % BITMASK_LEN]));
-    
-    free_unused(rb);
+static void inline __put_used(struct ring_bitmask *rb, long i) {
+	if (is_enabled(rb, i))
+		__atomic_dec(&(rb->status[i % BITMASK_LEN]));
 }
 
-void free_unused(struct ring_bitmask *rb) {
-    while ((rb->used <= rb->free) && is_disabled(rb, rb->used)) {
-        put_used(rb, rb->used);
-        __atomic_add(&(rb->used), 1);
-    }
+static void put_used(struct ring_bitmask *rb, long i) {
+	__put_used(rb, i);
+	
+	if (i == rb->used)
+		free_unused(rb);
 }
 
-long put_all(struct ring_bitmask *rb) {
-    long i = -1;
+static void free_unused(struct ring_bitmask *rb) {
+	while ((rb->used <= rb->free) && is_disabled(rb, rb->used)) {
+		__put_used(rb, rb->used);
+		__atomic_add(&(rb->used), 1);
+	}
+}
 
-    while (rb->used <= rb->free) {
-        put_used(rb, rb->used);
-        i = __atomic_add(&(rb->used), 1);
-    }
+static long put_all(struct ring_bitmask *rb) {
+	long i = -1;
 
-    return i;
+	while (rb->used <= rb->free) {
+		put_used(rb, rb->used);
+		i = __atomic_add(&(rb->used), 1);
+	}
+
+	return i;
 }
