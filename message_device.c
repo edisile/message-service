@@ -9,6 +9,7 @@
 #include <linux/vmalloc.h>
 
 #include "libs/lf_queue/lf_queue.h"
+#include "libs/ring_bitmask/ring_bitmask.h"
 
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
@@ -53,6 +54,7 @@ struct session_data {
 	ktime_t recv_timeout;
 	struct lf_queue queue;
 	struct mutex metadata_lock;
+	atomic_t delayed_status_ind; // Index of a delayed write status
 };
 
 // Data related to a single instance of the file
@@ -60,6 +62,7 @@ struct file_data {
 	struct lf_queue message_queue;
 	atomic_t stored_bytes;
 	struct wait_queue_head wait_queue;
+	struct ring_bitmask delays; // Will store the status of delayed writes
 };
 
 // Used to store data necessary for the delayed write mechanism
@@ -355,7 +358,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 		wakeup_time = ktime_get();
 		retval = __read_common(d, buff, len, off);
 
-		if (retval != 0)
+		if (retval > 0)
 			goto exit; // Success, return
 		else
 			goto retry; // Someone else stole the message, try to sleep again
@@ -485,7 +488,8 @@ int init_module(void) {
 	for (i = 0; i < MINORS; i++) {
 		files[i] = (struct file_data) {
 			.message_queue = NEW_LF_QUEUE,
-			.stored_bytes = ATOMIC_INIT(0)
+			.stored_bytes = ATOMIC_INIT(0),
+			.delays = NEW_RING_BITMASK
 		};
 
 		init_waitqueue_head(&(files[i].wait_queue));

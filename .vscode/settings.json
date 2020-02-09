@@ -3,6 +3,7 @@
         "typeinfo": "cpp",
         "random": "cpp",
         "tuple": "cpp",
-        "list": "c"
+        "list": "c",
+        "module.h": "c"
     }
 }
