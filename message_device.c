@@ -224,6 +224,9 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	return retval;
 }
 
+// Function to be executed as deferred work in order to push a message to the 
+// queue; before pushing, it checks if the push has been aborted by an ioctl 
+// REVOKE_DELAYED_MESSAGES request or a flush
 static void __delayed_work(struct work_struct *work) {
 	struct delayed_work *d_work;
 	struct delayed_write_data *data;
@@ -246,6 +249,8 @@ static void __delayed_work(struct work_struct *work) {
 	vfree(data); 
 }
 
+// Schedules a delayed work item to post a message on the queue; the message 
+// can be revoked via a REVOKE_DELAYED_MESSAGES ioctl call or a flush
 static ssize_t dev_write_timeout(struct file *filp, const char *buff, 
 								size_t len, loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
@@ -471,7 +476,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 }
 
 // Real flush implementation, just set all the delayed operations' status to 
-// disabled; when they will execute their messages won't be pushed to the queue
+// disabled; when they will execute, their messages won't be pushed to the queue
 static void __flush(struct file_data *d) {
 	wake_up_all(&(d->wait_queue));
 	put_all(&(d->delays));
@@ -482,7 +487,7 @@ static void __flush(struct file_data *d) {
 static int dev_flush(struct file *filp, void *id) {
 	printk("%s: flush requested on [%d,%d]", MODNAME, MAJOR, __MINOR(filp));
 	__flush(&files[__MINOR(filp)]);
-	
+
 	return 0;
 }
 
