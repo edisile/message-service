@@ -9,7 +9,6 @@
 #include <linux/vmalloc.h>
 
 #include "libs/lf_queue/lf_queue.h"
-#include "libs/ring_bitmask/ring_bitmask.h"
 
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
@@ -64,8 +63,6 @@ struct session_data {
 	ktime_t recv_timeout;
 	struct mutex metadata_lock;
 	struct timestamp *ts;
-
-	long delay_status_ind; // Index of a delayed write status // TODO: remove after ts is implemented
 };
 
 // Data related to a single instance of the file
@@ -74,8 +71,6 @@ struct file_data {
 	atomic_t stored_bytes;
 	struct wait_queue_head wait_queue;
 	ktime_t flush_time;
-
-	struct ring_bitmask delays; // Will store the status of delayed writes // TODO: remove after ts is implemented
 };
 
 // Used to store data necessary for the delayed write mechanism
@@ -84,8 +79,6 @@ struct delayed_write_data {
 	struct queue_elem *elem;
 	struct file_data *file;
 	struct timestamp *ts;
-
-	long delay_status_ind; // TODO: remove after ts is implemented
 };
 
 // ioctl commands
@@ -295,6 +288,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	retval = __write_common(d, buff, len, &elem, (bool) 1);
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
+	// The timestamp will be referenced by another delayed work, acquire it
 	__acquire_timestamp(s_data->ts); // MAYBE: move around
 
 	data = vmalloc(sizeof(struct delayed_write_data));
@@ -307,20 +301,6 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	data->file = d;
 	data->ts = s_data->ts;
 
-	// TODO: remove this VVV
-	if (s_data->delay_status_ind == -1 || 
-		is_disabled(&(d->delays), s_data->delay_status_ind)) {
-		// Delayed push is not enabled for this elem anymore, get a new one
-		s_data->delay_status_ind = get_free(&(d->delays));
-		printk("%s: requesting new delay status, got index %ld, %p\n", MODNAME, s_data->delay_status_ind, &(s_data->delay_status_ind));
-
-		if (s_data->delay_status_ind == -1) {
-			retval = -ENOMEM;
-		}
-	}
-	// TODO: remove this ^^^
-
-	data->delay_status_ind = s_data->delay_status_ind;
 	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
 
 	ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
@@ -335,7 +315,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 
 	cleanup:
 	if (data != NULL) vfree(data);
-	__release_timestamp(s_data->ts);
+	__release_timestamp(s_data->ts); // It failed, so the reference is no more
 	vfree(elem->message);
 	vfree(elem);
 	return retval;
@@ -415,6 +395,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	
 	if (timeout < 0) {
 		// Time's up, return now
+		printk("%s: timer expired", MODNAME);
 		retval = -ETIME;
 		goto exit;
 	}
@@ -424,15 +405,21 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 										d->message_queue.head != NULL, timeout);
 	}
 
+	printk("%s: woke up with %lldus remaining", MODNAME, timeout);
+
 	if (wait_ret == 0) {
 		// Condition has become true, try to read
 		wakeup_time = ktime_get();
 		retval = __read_common(d, buff, len, off);
 
-		if (retval > 0)
-			goto exit; // Success, return
-		else
+		if (retval > 0 || ktime_after(d->flush_time, entry_time)) {
+			if (ktime_after(d->flush_time, entry_time))
+				printk("%s: woke up because of flush", MODNAME);
+			
+			goto exit; // Successful read or flush, return
+		} else {
 			goto retry; // Someone else stole the message, try to sleep again
+		}
 		
 	} else if (wait_ret == -ETIME) {
 		// Time's up, return now
@@ -465,7 +452,7 @@ static long __alloc_session_data(struct file *filp) {
 			s_data->ts = ts;
 			s_data->recv_timeout = ktime_set(0, 0);
 			s_data->send_timeout = 0;
-			s_data->delay_status_ind = -1;
+			// s_data->delay_status_ind = -1;
 			mutex_init(&(s_data->metadata_lock)); // MAYBE: change into rw_lock?
 			
 			// try an atomic CAS on filp->private_data to set it to s_data,  
@@ -497,7 +484,6 @@ static long __alloc_session_data(struct file *filp) {
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	long retval = 0;
 	struct session_data *s_data;
-	struct file_data *d = &files[__MINOR(filp)];
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
@@ -519,7 +505,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		if (cmd == SET_SEND_TIMEOUT)
 			s_data->send_timeout = arg;
 		else
-			s_data->recv_timeout = ktime_set(0, arg);
+			s_data->recv_timeout = ktime_set(0, arg * NSEC_PER_USEC);
 		
 		// Select correct driver
 		filp->f_op = &f_ops[DRIVER_INDEX(s_data->send_timeout, s_data->recv_timeout)];
@@ -527,14 +513,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		mutex_unlock(&(s_data->metadata_lock));
 		break;
 	case REVOKE_DELAYED_MESSAGES:
-		// Set the delayed messages not yet pushed to the queue to be flushed
-		// TODO: remove this vvv
-		printk("%s: disabling index %ld, %p", MODNAME, s_data->delay_status_ind, &(s_data->delay_status_ind));
-		put_used(&(d->delays), s_data->delay_status_ind);
-		// TODO: remove this ^^^
-
 		atomic_long_set((atomic_long_t *) &(s_data->ts->time), ktime_get());
-
 		break;
 	default:
 		retval = -EINVAL;
@@ -559,7 +538,7 @@ static void __flush(struct file_data *d) {
 			goto retry; // Someone else changed the value, retry for safety
 	
 	wake_up_all(&(d->wait_queue));
-	put_all(&(d->delays));
+	// put_all(&(d->delays));
 }
 
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
@@ -601,7 +580,7 @@ int init_module(void) {
 		files[i] = (struct file_data) {
 			.message_queue = NEW_LF_QUEUE,
 			.stored_bytes = ATOMIC_INIT(0),
-			.delays = NEW_RING_BITMASK,
+			// .delays = NEW_RING_BITMASK,
 			.flush_time = ktime_set(0, 0) // Initial flush has time 0
 		};
 
