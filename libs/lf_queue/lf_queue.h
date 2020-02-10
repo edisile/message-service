@@ -3,6 +3,7 @@
 
 #define NEW_LF_QUEUE ((struct lf_queue) {.head = NULL, .tail = NULL})
 #define DEFINE_LF_QUEUE(name) struct lf_queue name = NEW_LF_QUEUE
+#define IS_EMPTY(q) (__atomic_sub(&q.head, 0) == NULL)
 
 struct lf_queue_node {
 	struct lf_queue_node *next;

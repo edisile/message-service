@@ -382,17 +382,18 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	int wait_ret = 0;
 	ssize_t retval = 0;
 	ktime_t entry_time, wakeup_time, timeout;
+	bool flushed;
 
 	entry_time = wakeup_time = ktime_get();
 	timeout = ((struct session_data *) filp->private_data)->recv_timeout;
 
 	printk("%s: read with timeout %lldns", MODNAME, timeout);
 
-	retry:
+	retry:	
 	// Compute remaining time to wait in case multiple wake-ups happen:
 	// timeout = timeout - (wakeup_time - entry_time)
 	timeout = ktime_sub(timeout, ktime_sub(wakeup_time, entry_time));
-	
+
 	if (timeout < 0) {
 		// Time's up, return now
 		printk("%s: timer expired", MODNAME);
@@ -400,31 +401,42 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 		goto exit;
 	}
 
-	if (d->message_queue.head == NULL) {
-		wait_ret = wait_event_hrtimeout(d->wait_queue, 
-										d->message_queue.head != NULL, timeout);
+	if (IS_EMPTY(d->message_queue)) {
+		// Wait until either a signal comes...
+		wait_ret = wait_event_interruptible_hrtimeout(d->wait_queue, 
+				!IS_EMPTY(d->message_queue) || // ... queue is not empty...
+				(flushed = ktime_after(d->flush_time, entry_time)), // ... flush is requested...
+				timeout); // ... or timeout expires
 	}
 
-	printk("%s: woke up with %lldus remaining", MODNAME, timeout);
+	wakeup_time = ktime_get();
 
-	if (wait_ret == 0) {
+	switch (wait_ret) {
+	case 0:
 		// Condition has become true, try to read
-		wakeup_time = ktime_get();
 		retval = __read_common(d, buff, len, off);
 
-		if (retval > 0 || ktime_after(d->flush_time, entry_time)) {
-			if (ktime_after(d->flush_time, entry_time))
-				printk("%s: woke up because of flush", MODNAME);
-			
+		if (retval > 0 || flushed) {
+			if (flushed) printk("%s: woke up because of flush", MODNAME);
 			goto exit; // Successful read or flush, return
 		} else {
 			goto retry; // Someone else stole the message, try to sleep again
 		}
+		break;
+	case -ETIME:
+	case -ERESTARTSYS:
+		// Time's up or a signal was received, return now
+		if (wait_ret == -ETIME)
+			printk("%s: woke up because of timer", MODNAME);
+		else
+			printk("%s: woke up because of signal", MODNAME);
 		
-	} else if (wait_ret == -ETIME) {
-		// Time's up, return now
-		retval = -ETIME;
+		retval = wait_ret;
 		goto exit;
+		break;
+	default:
+		printk(KERN_ERR "%s: woke up with error %d; this shouldn't happen", MODNAME, wait_ret);
+		break;
 	}
 
 	exit:
@@ -452,7 +464,6 @@ static long __alloc_session_data(struct file *filp) {
 			s_data->ts = ts;
 			s_data->recv_timeout = ktime_set(0, 0);
 			s_data->send_timeout = 0;
-			// s_data->delay_status_ind = -1;
 			mutex_init(&(s_data->metadata_lock)); // MAYBE: change into rw_lock?
 			
 			// try an atomic CAS on filp->private_data to set it to s_data,  
@@ -538,7 +549,6 @@ static void __flush(struct file_data *d) {
 			goto retry; // Someone else changed the value, retry for safety
 	
 	wake_up_all(&(d->wait_queue));
-	// put_all(&(d->delays));
 }
 
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
@@ -580,7 +590,6 @@ int init_module(void) {
 		files[i] = (struct file_data) {
 			.message_queue = NEW_LF_QUEUE,
 			.stored_bytes = ATOMIC_INIT(0),
-			// .delays = NEW_RING_BITMASK,
 			.flush_time = ktime_set(0, 0) // Initial flush has time 0
 		};
 
