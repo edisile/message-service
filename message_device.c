@@ -85,7 +85,7 @@ enum ioctl_cmds {
 // Globals
 static int MAJOR;
 #ifndef MINORS
-	#define MINORS 64
+	#define MINORS 4
 #endif
 static long max_message_size = 512;
 static long max_storage_size = 4096;
@@ -141,23 +141,22 @@ static int dev_open(struct inode *inode, struct file *filp) {
 	// MAYBE: remove
 	// Increment usage count if there's any IO session towards files managed 
 	// by this module
-	if (!try_module_get(THIS_MODULE)) {
-		// Module might have been removed
-		retval = -ENODEV;
-		goto exit;
-	}
+	// if (!try_module_get(THIS_MODULE)) {
+	// 	// Module might have been removed
+	// 	retval = -ENODEV;
+	// 	goto exit;
+	// }
 
 	printk("%s: device file opened\n", MODNAME);
 
-	exit:
+	// exit:
 	return retval;
 }
 
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
-	module_put(THIS_MODULE); // MAYBE: remove
+	// module_put(THIS_MODULE); // MAYBE: remove
 
-	// 
 	// private_data could contain data about the session, free it
 	if (filp->private_data != NULL) {
 		vfree(filp->private_data);
@@ -242,6 +241,11 @@ static void __delayed_work(struct work_struct *work) {
 
 	// Check if push was aborted in the meantime
 	printk("%s: status at index %ld", MODNAME, data->delay_status_ind);
+
+	if (ktime_before(data->elem->time, data->file->flush_time)) {
+		printk("%s: push should be aborted because of flush", MODNAME);
+	}
+
 	if (is_enabled(&(data->file->delays), data->delay_status_ind)) {
 		__push_to_queue(data->file, data->elem);
 		printk("%s: delayed push success\n", MODNAME);
@@ -329,17 +333,16 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 		elem = container_of(node, struct queue_elem, list);
 
 		// Check if message has been invalidated by a flush
-		// buff == NULL means just flushing the message
+		// buff == NULL means just flushing the message anyway
 		if (ktime_after(elem->time, d->flush_time) && buff != NULL) {
 			retval = len = min(len, elem->mess_len);
 			printk("	%lu bytes to read", len);
 			copy_to_user(buff, elem->message + *off, len);
 		} else {
-			printk("	%lu bytes dumped", len);
-			printk("	message written at %lld, flushed at %lld", elem->time, d->flush_time);
-
+			printk("	%lu bytes flushed", len);
 			// Message was flushed because of time
 			if (ktime_before(elem->time, d->flush_time)) {
+				printk("	message written at %lld, flushed at %lld", elem->time, d->flush_time);
 				flushed = 1;
 			}
 		}
@@ -485,7 +488,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		mutex_unlock(&(s_data->metadata_lock));
 		break;
 	case REVOKE_DELAYED_MESSAGES:
-		// Set the delayed messages not yet pushed to the queue to be dumped
+		// Set the delayed messages not yet pushed to the queue to be flushed
 		printk("%s: disabling index %ld, %p", MODNAME, s_data->delay_status_ind, &(s_data->delay_status_ind));
 		put_used(&(d->delays), s_data->delay_status_ind);
 		break;
@@ -505,9 +508,10 @@ static void __flush(struct file_data *d) {
 
 	t = ktime_get();
 	retry:
+	printk("%s: setting flush timestamp\n", MODNAME);
 	ft = d->flush_time;
 	if (ktime_after(t, ft))
-		if (atomic_cmpxchg((atomic_t *) &(d->flush_time), ft, t) != ft)
+		if (atomic_long_cmpxchg((atomic_long_t *) &(d->flush_time), ft, t) != ft)
 			goto retry; // Someone else changed the value, retry for safety
 	
 	wake_up_all(&(d->wait_queue));
@@ -567,7 +571,7 @@ int init_module(void) {
 void cleanup_module(void) {
 	int i;
 
-	// Flush all files; sets all delayed work to dump their messages and wakes 
+	// Flush all files; sets all delayed work to flush their messages and wakes 
 	// up any readers that are still waiting
 	for (i = 0; i < MINORS; i++) {
 		__flush(&(files[i]));
@@ -583,8 +587,8 @@ void cleanup_module(void) {
 
 	for (i = 0; i < MINORS; i++) {
 		printk("%s: cleaning device #%d\n", MODNAME, i);
-		// calling __read_common with buff == NULL just dumps the message from 
-		// the queue
+		// calling __read_common with buff == NULL just flushes the message 
+		// from the queue
 		while (__read_common(&files[i], NULL, 1, NULL) > 0);
 	}
 
