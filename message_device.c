@@ -45,6 +45,7 @@ struct queue_elem {
 	unsigned char *message;
 	unsigned long mess_len;
 	struct lf_queue_node list;
+	ktime_t time;
 };
 
 // Data related to a single I/O session, will be stored in the private_data 
@@ -63,6 +64,7 @@ struct file_data {
 	atomic_t stored_bytes;
 	struct wait_queue_head wait_queue;
 	struct ring_bitmask delays; // Will store the status of delayed writes
+	ktime_t flush_time;
 };
 
 // Used to store data necessary for the delayed write mechanism
@@ -169,7 +171,7 @@ static int dev_release(struct inode *inode, struct file *filp) {
 // Stores len bytes (or less) of the message provided in buff inside a 
 // queue_elem whose address is placed at elem_addr
 static ssize_t __write_common(struct file_data *d, const char *buff, size_t len, 
-							struct queue_elem **elem_addr) {
+							struct queue_elem **elem_addr, bool delayed) {
 	ssize_t retval;
 	unsigned long failed;
 	
@@ -180,9 +182,11 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 
 	// Allocate memory for the message
 	*elem_addr = vmalloc(sizeof(struct queue_elem));
-	if (elem_addr != NULL)
+	if (elem_addr != NULL) {
+		(*elem_addr)->time = delayed ? ktime_get() : KTIME_MAX;
 		(*elem_addr)->message = vmalloc(len);
-	
+	}
+
 	if (*elem_addr == NULL || (*elem_addr)->message == NULL) {
 		// Allocations failed, exit with an error
 		if (*elem_addr != NULL) vfree(*elem_addr);
@@ -215,7 +219,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 
 	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
 
-	retval = __write_common(d, buff, len, &elem);
+	retval = __write_common(d, buff, len, &elem, (bool) 0);
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
 	__push_to_queue(d, elem);
@@ -263,7 +267,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 
 	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
 
-	retval = __write_common(d, buff, len, &elem);
+	retval = __write_common(d, buff, len, &elem, (bool) 1);
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
 	data = vmalloc(sizeof(struct delayed_write_data));
@@ -312,23 +316,39 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 							loff_t *off) {
 	struct lf_queue_node *node;
 	struct queue_elem *elem;
+	bool flushed;
 	ssize_t retval = 0;
 
 	printk("%s: read on [%d,%d]\n", MODNAME, MAJOR, (int) (d - files));
 	
+	retry:
+	flushed = 0;
 	node = lf_queue_pull(&(d->message_queue));
 
 	if (node != NULL) {
 		elem = container_of(node, struct queue_elem, list);
-		retval = len = min(len, elem->mess_len);
-		printk("	%lu bytes to read", len);
 
-		if (buff != NULL) // buff == NULL means just flushing the message
+		// Check if message has been invalidated by a flush
+		// buff == NULL means just flushing the message
+		if (ktime_after(elem->time, d->flush_time) && buff != NULL) {
+			retval = len = min(len, elem->mess_len);
+			printk("	%lu bytes to read", len);
 			copy_to_user(buff, elem->message + *off, len);
-	
+		} else {
+			printk("	%lu bytes dumped", len);
+			printk("	message written at %lld, flushed at %lld", elem->time, d->flush_time);
+
+			// Message was flushed because of time
+			if (ktime_before(elem->time, d->flush_time)) {
+				flushed = 1;
+			}
+		}
+
 		atomic_sub(elem->mess_len, &(d->stored_bytes)); // Space being freed
 		vfree(elem->message);
 		vfree(elem);
+
+		if (flushed) goto retry;
 	}
 
 	return retval;
@@ -481,6 +501,15 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 // Real flush implementation, just set all the delayed operations' status to 
 // disabled; when they will execute, their messages won't be pushed to the queue
 static void __flush(struct file_data *d) {
+	ktime_t t, ft; // Current time and current flush time
+
+	t = ktime_get();
+	retry:
+	ft = d->flush_time;
+	if (ktime_after(t, ft))
+		if (atomic_cmpxchg((atomic_t *) &(d->flush_time), ft, t) != ft)
+			goto retry; // Someone else changed the value, retry for safety
+	
 	wake_up_all(&(d->wait_queue));
 	put_all(&(d->delays));
 }
@@ -488,7 +517,7 @@ static void __flush(struct file_data *d) {
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
 // readers; the exported VFS operation is just an wrapper for __flush
 static int dev_flush(struct file *filp, void *id) {
-	printk("%s: flush requested on [%d,%d]", MODNAME, MAJOR, __MINOR(filp));
+	printk("%s: flush requested on [%d,%d] at %lld", MODNAME, MAJOR, __MINOR(filp), ktime_get());
 	__flush(&files[__MINOR(filp)]);
 
 	return 0;
@@ -524,7 +553,8 @@ int init_module(void) {
 		files[i] = (struct file_data) {
 			.message_queue = NEW_LF_QUEUE,
 			.stored_bytes = ATOMIC_INIT(0),
-			.delays = NEW_RING_BITMASK
+			.delays = NEW_RING_BITMASK,
+			.flush_time = ktime_set(0, 0) // Initial flush has time 0
 		};
 
 		init_waitqueue_head(&(files[i].wait_queue));
