@@ -40,6 +40,15 @@ static int dev_flush(struct file *filp, void *id);
 
 // Struct definitions
 
+// A timestamp with a reference counter
+struct timestamp {
+	ktime_t time;
+	atomic_t refs;
+};
+
+#define __acquire_timestamp(ts) (atomic_inc(&(ts->refs)))
+#define __release_timestamp(ts) if (atomic_dec_and_test(&ts->refs)) vfree(ts)
+
 // This will hold the messages in a queue
 struct queue_elem {
 	unsigned char *message;
@@ -53,9 +62,10 @@ struct queue_elem {
 struct session_data {
 	unsigned long send_timeout;
 	ktime_t recv_timeout;
-	struct lf_queue queue;
 	struct mutex metadata_lock;
-	long delay_status_ind; // Index of a delayed write status
+	struct timestamp *ts;
+
+	long delay_status_ind; // Index of a delayed write status // TODO: remove after ts is implemented
 };
 
 // Data related to a single instance of the file
@@ -63,8 +73,9 @@ struct file_data {
 	struct lf_queue message_queue;
 	atomic_t stored_bytes;
 	struct wait_queue_head wait_queue;
-	struct ring_bitmask delays; // Will store the status of delayed writes
 	ktime_t flush_time;
+
+	struct ring_bitmask delays; // Will store the status of delayed writes // TODO: remove after ts is implemented
 };
 
 // Used to store data necessary for the delayed write mechanism
@@ -72,7 +83,9 @@ struct delayed_write_data {
 	struct delayed_work dwork;
 	struct queue_elem *elem;
 	struct file_data *file;
-	long delay_status_ind;
+	struct timestamp *ts;
+
+	long delay_status_ind; // TODO: remove after ts is implemented
 };
 
 // ioctl commands
@@ -156,9 +169,12 @@ static int dev_open(struct inode *inode, struct file *filp) {
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
 	// module_put(THIS_MODULE); // MAYBE: remove
+	struct session_data *s_data = (struct session_data *) filp->private_data;
 
 	// private_data could contain data about the session, free it
-	if (filp->private_data != NULL) {
+	if (s_data != NULL) {
+		__release_timestamp(s_data->ts);
+
 		vfree(filp->private_data);
 		filp->private_data = NULL;
 	}
@@ -239,14 +255,18 @@ static void __delayed_work(struct work_struct *work) {
 
 	printk("%s: delayed func call\n", MODNAME);
 
-	// Check if push was aborted in the meantime
-	printk("%s: status at index %ld", MODNAME, data->delay_status_ind);
-
 	if (ktime_before(data->elem->time, data->file->flush_time)) {
 		printk("%s: push should be aborted because of flush", MODNAME);
 	}
 
-	if (is_enabled(&(data->file->delays), data->delay_status_ind)) {
+	if (ktime_before(data->elem->time, data->ts->time)) {
+		printk("%s: push should be aborted because of revoke", MODNAME);
+	}
+
+	// Check if push was aborted in the meantime: if the message timestamp 
+	// comes after the last flush or last revoke push it to the queue
+	if (ktime_after(data->elem->time, data->file->flush_time) &&
+			ktime_after(data->elem->time, data->ts->time)) {
 		__push_to_queue(data->file, data->elem);
 		printk("%s: delayed push success\n", MODNAME);
 	} else {
@@ -255,6 +275,7 @@ static void __delayed_work(struct work_struct *work) {
 		vfree(data->elem);
 	}
 
+	__release_timestamp(data->ts);
 	vfree(data); 
 }
 
@@ -274,6 +295,8 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	retval = __write_common(d, buff, len, &elem, (bool) 1);
 	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
 
+	__acquire_timestamp(s_data->ts); // MAYBE: move around
+
 	data = vmalloc(sizeof(struct delayed_write_data));
 	if (data == NULL) {
 		retval = -ENOMEM;
@@ -282,7 +305,9 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 
 	data->elem = elem;
 	data->file = d;
+	data->ts = s_data->ts;
 
+	// TODO: remove this VVV
 	if (s_data->delay_status_ind == -1 || 
 		is_disabled(&(d->delays), s_data->delay_status_ind)) {
 		// Delayed push is not enabled for this elem anymore, get a new one
@@ -293,6 +318,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 			retval = -ENOMEM;
 		}
 	}
+	// TODO: remove this ^^^
 
 	data->delay_status_ind = s_data->delay_status_ind;
 	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
@@ -309,6 +335,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 
 	cleanup:
 	if (data != NULL) vfree(data);
+	__release_timestamp(s_data->ts);
 	vfree(elem->message);
 	vfree(elem);
 	return retval;
@@ -421,29 +448,41 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 // concurrency-safe fashion
 static long __alloc_session_data(struct file *filp) {
 	struct session_data *s_data;
-	void *res;
+	struct timestamp *ts;
 	long retval = 0;
 	
 	retry:
 	if (filp->private_data == NULL) {
 		s_data = vmalloc(sizeof(struct session_data));
+		ts = vmalloc(sizeof(struct timestamp));
 
-		if (s_data != NULL) {
-			s_data->queue = NEW_LF_QUEUE;
+		if (s_data != NULL && ts != NULL) {
+			*ts = (struct timestamp) {
+				.time = ktime_set(0, 0),
+				.refs = ATOMIC_INIT(1)
+			};
+
+			s_data->ts = ts;
 			s_data->recv_timeout = ktime_set(0, 0);
 			s_data->send_timeout = 0;
 			s_data->delay_status_ind = -1;
-			mutex_init(&(s_data->metadata_lock));
+			mutex_init(&(s_data->metadata_lock)); // MAYBE: change into rw_lock?
 			
 			// try an atomic CAS on filp->private_data to set it to s_data,  
 			// if it fails dealloc and go to retry just to be sure
-			res = __sync_val_compare_and_swap(&(filp->private_data), 
-											NULL, (void *) s_data);
-			if (res != NULL) {
+			retval = atomic_long_cmpxchg((atomic_long_t *) &(filp->private_data), 
+										(long) NULL, 
+										(long) s_data);
+
+			if ((void *) retval != NULL) {
+				vfree(ts);
 				vfree(s_data);
 				goto retry;
 			} else goto exit;
 		} else {
+			if (ts != NULL) vfree(ts);
+			if (s_data != NULL) vfree(s_data);
+
 			retval = -ENOMEM;
 			goto exit;
 		}
@@ -489,8 +528,13 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		break;
 	case REVOKE_DELAYED_MESSAGES:
 		// Set the delayed messages not yet pushed to the queue to be flushed
+		// TODO: remove this vvv
 		printk("%s: disabling index %ld, %p", MODNAME, s_data->delay_status_ind, &(s_data->delay_status_ind));
 		put_used(&(d->delays), s_data->delay_status_ind);
+		// TODO: remove this ^^^
+
+		atomic_long_set((atomic_long_t *) &(s_data->ts->time), ktime_get());
+
 		break;
 	default:
 		retval = -EINVAL;

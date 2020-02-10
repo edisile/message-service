@@ -4,6 +4,7 @@
         "random": "cpp",
         "tuple": "cpp",
         "list": "c",
-        "module.h": "c"
+        "module.h": "c",
+        "queue": "c"
     }
 }
