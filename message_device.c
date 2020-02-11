@@ -211,8 +211,7 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	long free_b, stored_b;
 	
 	if (len > atomic_long_read(&max_message_size)) {
-		retval = -EMSGSIZE;
-		goto exit;
+		return -EMSGSIZE;
 	}
 
 	retry:
@@ -222,8 +221,7 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	free_b = atomic_long_read(&max_storage_size) - stored_b;
 	
 	if (len > free_b) {
-		retval = -ENOSPC;
-		goto exit;
+		return -ENOSPC;
 	}
 
 	if (atomic_long_cmpxchg(&(d->stored_bytes), stored_b, stored_b + len) != stored_b)
@@ -251,7 +249,6 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 
 	retval = (*elem_addr)->mess_len = len;
 
-	exit:
 	return retval;
 
 	cleanup:
@@ -278,7 +275,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
 
 	retval = __write_common(d, buff, len, &elem, (bool) 0);
-	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
+	if (retval == -ENOMEM || retval == -ENOSPC)
+        goto exit;
 
 	__push_to_queue(d, elem);
 	
@@ -314,6 +312,8 @@ static void __delayed_work(struct work_struct *work) {
 		printk("%s: delayed push success\n", MODNAME);
 	} else {
 		printk("%s: delayed push aborted\n", MODNAME);
+        // Free the message and remove if from the stored bytes count
+        atomic_long_sub(data->elem->mess_len, &(data->file->stored_bytes));
 		vfree(data->elem->message);
 		vfree(data->elem);
 	}
@@ -415,7 +415,8 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 			}
 		}
 
-		atomic_long_sub(elem->mess_len, &(d->stored_bytes)); // Space being freed
+        // Free the message and remove if from the stored bytes count
+		atomic_long_sub(elem->mess_len, &(d->stored_bytes));
 		vfree(elem->message);
 		vfree(elem);
 
@@ -449,8 +450,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	s_data = __acquire_s_data(filp->private_data);
 	if (s_data == NULL) {
 		// Someone closed the file concurrently to the read call
-		retval = -EBADFD;
-		goto exit;
+		return -EBADFD;
 	}
 
 	entry_time = wakeup_time = ktime_get();
@@ -485,11 +485,11 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 		// Condition has become true, try to read
 		retval = __read_common(d, buff, len, off);
 
-		if (retval > 0 || flushed) {
-			if (flushed) printk("%s: woke up because of flush", MODNAME);
-			goto exit; // Successful read or flush, return
-		} else {
+		if (retval == 0 && !flushed) {
 			goto retry; // Someone else stole the message, try to sleep again
+		} else {
+            // Successful read or flush, return
+			if (flushed) printk("%s: woke up because of flush", MODNAME);
 		}
 		break;
 	case -ETIME:
@@ -501,7 +501,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 			printk("%s: woke up because of signal", MODNAME);
 		
 		retval = wait_ret;
-		goto exit;
+		
 		break;
 	default:
 		printk(KERN_ERR "%s: woke up with error %d; this shouldn't happen", MODNAME, wait_ret);
@@ -550,17 +550,15 @@ static long __alloc_session_data(struct file *filp) {
 				vfree(ts);
 				vfree(s_data);
 				goto retry;
-			} else goto exit;
+			}
 		} else {
 			if (ts != NULL) vfree(ts);
 			if (s_data != NULL) vfree(s_data);
 
 			retval = -ENOMEM;
-			goto exit;
 		}
 	}
 
-	exit:
 	return retval;
 }
 
@@ -577,7 +575,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		retval = __alloc_session_data(filp);
 		if (retval != 0) {
 			printk("%s: ioctl failed", MODNAME);
-			goto exit;
+			return retval;
 		}
 	}
 
@@ -587,7 +585,6 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	if (s_data == NULL) {
 		// Someone closed the file concurrently to the ioctl call
 		retval = -EBADFD;
-		goto exit;
 	}
 
 	switch (cmd) {
@@ -616,7 +613,6 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	// Release the acquired reference
 	__release_s_data(s_data);
 
-	exit:
 	return retval;
 }
 
@@ -657,8 +653,7 @@ int init_module(void) {
 
 	if (MAJOR < 0) {
 		printk(KERN_ERR "%s: register failed with major %d\n", MODNAME, MAJOR);
-		retval = MAJOR;
-		goto exit;
+		return MAJOR;
 	}
 
 	printk("%s: registered as %d\n", MODNAME, MAJOR);
@@ -667,8 +662,7 @@ int init_module(void) {
 	if (work_queue == NULL) {
 		// Work queue was not allocated due to kzalloc failure, return with a 
 		// "no memory" error
-		retval = -ENOMEM;
-		goto exit;
+		return -ENOMEM;
 	}
 
 	// Initialize the data struct for all possible file instances
@@ -682,7 +676,6 @@ int init_module(void) {
 		init_waitqueue_head(&(files[i].wait_queue));
 	}
 
-	exit:
 	return retval;
 }
 
