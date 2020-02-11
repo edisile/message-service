@@ -1,9 +1,18 @@
 #include <stddef.h>
 #include "../gcc_wrappers/gcc_wrappers.h"
+#ifdef __KERNEL__
+	#include <linux/delay.h>
+	#define __sleep_range(min, max) (usleep_range(min, max))
+#else
+	#include <unistd.h>
+	__sleep_range(min, max) (usleep((min + max) / 2))
+#endif
 
 #define NEW_LF_QUEUE ((struct lf_queue) {.head = NULL, .tail = NULL})
 #define DEFINE_LF_QUEUE(name) struct lf_queue name = NEW_LF_QUEUE
 #define IS_EMPTY(q) (__atomic_sub(&q.head, 0) == NULL)
+#define __SLEEP_MIN 10
+#define __SLEEP_MAX 50
 
 struct lf_queue_node {
 	struct lf_queue_node *next;
@@ -87,8 +96,8 @@ static struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	}
 	
 	while (elem->counter > 1) {
-		// usleep(250); // Give others time to leave this node alone
-		// TODO: maybe replace with some wait event queue?
+		__sleep_range(__SLEEP_MIN, __SLEEP_MAX);
+		// Give others time to leave this node alone
 	}
 
 	// If someone appends something to this elem while dequeueing the last elem

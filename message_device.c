@@ -68,7 +68,7 @@ struct session_data {
 // Data related to a single instance of the file
 struct file_data {
 	struct lf_queue message_queue;
-	atomic_t stored_bytes;
+	atomic_long_t stored_bytes;
 	struct wait_queue_head wait_queue;
 	ktime_t flush_time;
 };
@@ -99,6 +99,7 @@ static struct file_data files[MINORS];
 static struct workqueue_struct *work_queue;
 
 // Module parameters exposed via the /sys/ pseudo-fs
+// MAYBE: make atomic_long_t a valid module param type
 module_param(max_message_size, long, 0660);
 module_param(max_storage_size, long, 0660);
 
@@ -176,17 +177,31 @@ static int dev_release(struct inode *inode, struct file *filp) {
 	return 0;
 }
 
-// Stores len bytes (or less) of the message provided in buff inside a 
-// queue_elem whose address is placed at elem_addr
+// Stores the message provided in buff inside a queue_elem whose address is 
+// placed at elem_addr while keeping the count of the bytes stored in the device
 static ssize_t __write_common(struct file_data *d, const char *buff, size_t len, 
 							struct queue_elem **elem_addr, bool delayed) {
 	ssize_t retval;
-	unsigned long failed;
+	long free_b, stored_b;
 	
-	if (len > min(max_message_size, max_storage_size - d->stored_bytes.counter)) {
+	if (len > atomic_long_read((atomic_long_t *) &max_message_size)) {
+		retval = -EMSGSIZE;
+		goto exit;
+	}
+
+	retry:
+	// Calculate free space on device, if message is too large return -ENOSPC, 
+	// otherwise try to pre-reserve len bytes
+	stored_b = atomic_long_read((atomic_long_t *) &(d->stored_bytes));
+	free_b = atomic_long_read((atomic_long_t *) &max_storage_size) - stored_b; // MAYBE: make max_storage_size an atomic param
+	
+	if (len > free_b) {
 		retval = -ENOSPC;
 		goto exit;
 	}
+
+	if (atomic_long_cmpxchg(&(d->stored_bytes), stored_b, stored_b + len) != stored_b)
+		goto retry;
 
 	// Allocate memory for the message
 	*elem_addr = vmalloc(sizeof(struct queue_elem));
@@ -197,18 +212,27 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 
 	if (*elem_addr == NULL || (*elem_addr)->message == NULL) {
 		// Allocations failed, exit with an error
-		if (*elem_addr != NULL) vfree(*elem_addr);
-
 		retval = -ENOMEM;
-		goto exit;
+		goto cleanup;
 	}
 
 	printk("	%lu bytes to write", len);
-	failed = copy_from_user((*elem_addr)->message, buff, len);
-	retval = (*elem_addr)->mess_len = len - failed;
-	atomic_add(retval, &(d->stored_bytes)); // Keep track of used space in device
+	if (copy_from_user((*elem_addr)->message, buff, len) != 0) {
+		printk("	failure to copy all bytes");
+		retval = -EFAULT;
+		goto cleanup;
+	}
+
+	retval = (*elem_addr)->mess_len = len;
 
 	exit:
+	return retval;
+
+	cleanup:
+	if (*elem_addr != NULL) vfree(*elem_addr);
+	if ((*elem_addr)->message != NULL) vfree((*elem_addr)->message);
+	// Message posting failed, free the pre-reserved space
+	atomic_long_sub(len, &(d->stored_bytes));
 	return retval;
 }
 
@@ -354,7 +378,7 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 			}
 		}
 
-		atomic_sub(elem->mess_len, &(d->stored_bytes)); // Space being freed
+		atomic_long_sub(elem->mess_len, &(d->stored_bytes)); // Space being freed
 		vfree(elem->message);
 		vfree(elem);
 
@@ -535,17 +559,19 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	return retval;
 }
 
-// Real flush implementation, just set all the delayed operations' status to 
-// disabled; when they will execute, their messages won't be pushed to the queue
+// Real flush implementation, just set the flush timestamp and wake all waiting 
+// threads; all the delayed operations will flush their messages when they will 
+// execute and delayed messages on the queue will be flushed upon read
 static void __flush(struct file_data *d) {
-	ktime_t t, ft; // Current time and current flush time
+	ktime_t f_time; // Current flush time
+	ktime_t now = ktime_get();
 
-	t = ktime_get();
 	retry:
-	printk("%s: setting flush timestamp\n", MODNAME);
-	ft = d->flush_time;
-	if (ktime_after(t, ft))
-		if (atomic_long_cmpxchg((atomic_long_t *) &(d->flush_time), ft, t) != ft)
+	printk("%s: setting flush timestamp to %lld\n", MODNAME, now);
+	f_time = d->flush_time;
+	if (ktime_after(now, f_time))
+		if (atomic_long_cmpxchg((atomic_long_t *) &(d->flush_time), 
+								f_time, now) != f_time)
 			goto retry; // Someone else changed the value, retry for safety
 	
 	wake_up_all(&(d->wait_queue));
@@ -554,7 +580,6 @@ static void __flush(struct file_data *d) {
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
 // readers; the exported VFS operation is just an wrapper for __flush
 static int dev_flush(struct file *filp, void *id) {
-	printk("%s: flush requested on [%d,%d] at %lld", MODNAME, MAJOR, __MINOR(filp), ktime_get());
 	__flush(&files[__MINOR(filp)]);
 
 	return 0;
@@ -589,7 +614,7 @@ int init_module(void) {
 	for (i = 0; i < MINORS; i++) {
 		files[i] = (struct file_data) {
 			.message_queue = NEW_LF_QUEUE,
-			.stored_bytes = ATOMIC_INIT(0),
+			.stored_bytes = ATOMIC_LONG_INIT(0),
 			.flush_time = ktime_set(0, 0) // Initial flush has time 0
 		};
 
