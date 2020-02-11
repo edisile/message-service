@@ -5,6 +5,7 @@
         "tuple": "cpp",
         "list": "c",
         "module.h": "c",
-        "queue": "c"
+        "queue": "c",
+        "errno.h": "c"
     }
 }

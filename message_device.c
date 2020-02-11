@@ -9,6 +9,8 @@
 #include <linux/vmalloc.h>
 
 #include "libs/lf_queue/lf_queue.h"
+#include "libs/atomic_long_kp/atomic_long_kp.h"
+#include "libs/timestamp/timestamp.h"
 
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
@@ -39,15 +41,6 @@ static int dev_flush(struct file *filp, void *id);
 
 // Struct definitions
 
-// A timestamp with a reference counter
-struct timestamp {
-	ktime_t time;
-	atomic_t refs;
-};
-
-#define __acquire_timestamp(ts) (atomic_inc(&(ts->refs)))
-#define __release_timestamp(ts) if (atomic_dec_and_test(&ts->refs)) vfree(ts)
-
 // This will hold the messages in a queue
 struct queue_elem {
 	unsigned char *message;
@@ -63,7 +56,10 @@ struct session_data {
 	ktime_t recv_timeout;
 	struct mutex metadata_lock;
 	struct timestamp *ts;
+	atomic_t refs;
 };
+
+#define __void_ptr_to_s_data_ptr(p) ((struct session_data *) p)
 
 // Data related to a single instance of the file
 struct file_data {
@@ -93,15 +89,16 @@ static int MAJOR;
 #ifndef MINORS
 	#define MINORS 4
 #endif
-static long max_message_size = 512;
-static long max_storage_size = 4096;
+static atomic_long_t max_message_size = ATOMIC_LONG_INIT(512);
+static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(4096);
 static struct file_data files[MINORS];
 static struct workqueue_struct *work_queue;
 
-// Module parameters exposed via the /sys/ pseudo-fs
-// MAYBE: make atomic_long_t a valid module param type
-module_param(max_message_size, long, 0660);
-module_param(max_storage_size, long, 0660);
+// Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is a 
+// custom kernel_param_ops struct that implements a atomic set on variables of
+// atomic_long_t type
+module_param_cb(max_message_size, &atomic_long_param_ops, &max_message_size, 0660);
+module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 0660);
 
 
 // Macro to create a struct containing a driver instance
@@ -131,6 +128,29 @@ static struct file_operations f_ops[4] = {
 
 // Get the index of the correct driver based on send and receive timeout values
 #define DRIVER_INDEX(st, rt) (((rt ? 0x1 : 0) | (st ? 0x2 : 0)))
+
+// Helper methods for acquiring and releasing references to a session_data struct
+
+// Converts a void pointer like void *file::private_data to an s_data pointer 
+// while counting references to this struct
+static inline struct session_data *__acquire_s_data(void *ptr) {
+	struct session_data *s_data = NULL;
+
+	if (ptr != NULL) {
+		s_data = __void_ptr_to_s_data_ptr(ptr);
+		atomic_inc(&(s_data->refs));
+	}
+	
+	return s_data;
+}
+
+// Decrements the reference counter for the instance of s_data struct and frees 
+// it when there's no more references
+static inline void __release_s_data(struct session_data *s_data) {
+	if (s_data != NULL)
+		if (atomic_dec_and_test(&s_data->refs))
+			vfree(s_data);
+}
 
 
 // Driver implementation
@@ -163,14 +183,20 @@ static int dev_open(struct inode *inode, struct file *filp) {
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
 	// module_put(THIS_MODULE); // MAYBE: remove
-	struct session_data *s_data = (struct session_data *) filp->private_data;
+	struct session_data *s_data = __void_ptr_to_s_data_ptr(filp->private_data);
 
-	// private_data could contain data about the session, free it
+	// s_data might have not been created for this structure
 	if (s_data != NULL) {
+		// Hide the session_data struct from any new accessors
+		atomic_long_set((atomic_long_t *) filp->private_data, (long) NULL);
+	
 		__release_timestamp(s_data->ts);
 
-		vfree(filp->private_data);
-		filp->private_data = NULL;
+		// Wait for the references to drop to 1
+		while (s_data->refs.counter > 1)
+			usleep_range(50, 100);
+
+		__release_s_data(s_data);
 	}
 
 	printk("%s: device file closed\n", MODNAME);
@@ -184,7 +210,7 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	ssize_t retval;
 	long free_b, stored_b;
 	
-	if (len > atomic_long_read((atomic_long_t *) &max_message_size)) {
+	if (len > atomic_long_read(&max_message_size)) {
 		retval = -EMSGSIZE;
 		goto exit;
 	}
@@ -192,8 +218,8 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	retry:
 	// Calculate free space on device, if message is too large return -ENOSPC, 
 	// otherwise try to pre-reserve len bytes
-	stored_b = atomic_long_read((atomic_long_t *) &(d->stored_bytes));
-	free_b = atomic_long_read((atomic_long_t *) &max_storage_size) - stored_b; // MAYBE: make max_storage_size an atomic param
+	stored_b = atomic_long_read(&(d->stored_bytes));
+	free_b = atomic_long_read(&max_storage_size) - stored_b;
 	
 	if (len > free_b) {
 		retval = -ENOSPC;
@@ -301,20 +327,26 @@ static void __delayed_work(struct work_struct *work) {
 static ssize_t dev_write_timeout(struct file *filp, const char *buff, 
 								size_t len, loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
-	struct session_data *s_data =  (struct session_data *) filp->private_data;
+	struct session_data *s_data;
 	struct queue_elem *elem;
 	struct delayed_write_data *data = NULL;
 	bool ok;
 	ssize_t retval;
 
 	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
+	s_data = __acquire_s_data(filp->private_data);
+
+	if (s_data == NULL) {
+		// s_data has been hidden/deallocated while closing the session
+		printk("%s: ts access from NULL s_data pointer", MODNAME);
+		retval = -EBADFD;
+		goto exit;
+	}
 
 	retval = __write_common(d, buff, len, &elem, (bool) 1);
-	if (retval == -ENOMEM || retval == -ENOSPC) goto exit;
-
-	// The timestamp will be referenced by another delayed work, acquire it
-	__acquire_timestamp(s_data->ts); // MAYBE: move around
-
+	if (retval == -ENOMEM || retval == -ENOSPC)
+		goto exit; // Write failed to store the message
+	
 	data = vmalloc(sizeof(struct delayed_write_data));
 	if (data == NULL) {
 		retval = -ENOMEM;
@@ -324,22 +356,27 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	data->elem = elem;
 	data->file = d;
 	data->ts = s_data->ts;
+	// The timestamp will be referenced by another delayed work, acquire it
+	__acquire_timestamp(s_data->ts);
 
 	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
 
 	ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
 	if (!ok) {
+		__release_timestamp(s_data->ts); // The ts reference is no more
 		retval = -EAGAIN;
 		goto cleanup;
 	}
+
 	printk("%s: work enqueued, 0x%p\n", MODNAME, data);
 
 	exit:
+	__release_s_data(s_data);
 	return retval;
 
 	cleanup:
 	if (data != NULL) vfree(data);
-	__release_timestamp(s_data->ts); // It failed, so the reference is no more
+	__release_s_data(s_data);
 	vfree(elem->message);
 	vfree(elem);
 	return retval;
@@ -403,13 +440,21 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len, 
 								loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
+	struct session_data *s_data;
 	int wait_ret = 0;
 	ssize_t retval = 0;
 	ktime_t entry_time, wakeup_time, timeout;
 	bool flushed;
 
+	s_data = __acquire_s_data(filp->private_data);
+	if (s_data == NULL) {
+		// Someone closed the file concurrently to the read call
+		retval = -EBADFD;
+		goto exit;
+	}
+
 	entry_time = wakeup_time = ktime_get();
-	timeout = ((struct session_data *) filp->private_data)->recv_timeout;
+	timeout = s_data->recv_timeout;
 
 	printk("%s: read with timeout %lldns", MODNAME, timeout);
 
@@ -464,6 +509,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	}
 
 	exit:
+	__release_s_data(s_data);
 	return retval;
 }
 
@@ -485,9 +531,13 @@ static long __alloc_session_data(struct file *filp) {
 				.refs = ATOMIC_INIT(1)
 			};
 
-			s_data->ts = ts;
-			s_data->recv_timeout = ktime_set(0, 0);
-			s_data->send_timeout = 0;
+			*s_data = (struct session_data) {
+				.ts = ts,
+				.recv_timeout = ktime_set(0, 0),
+				.send_timeout = 0,
+				.refs = ATOMIC_INIT(1)
+			};
+
 			mutex_init(&(s_data->metadata_lock)); // MAYBE: change into rw_lock?
 			
 			// try an atomic CAS on filp->private_data to set it to s_data,  
@@ -522,15 +572,23 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
+	// This session might not have an associated session_data struct yet
 	if (filp->private_data == NULL) {
 		retval = __alloc_session_data(filp);
 		if (retval != 0) {
 			printk("%s: ioctl failed", MODNAME);
 			goto exit;
 		}
-	} 
+	}
 
-	s_data = (struct session_data *) filp->private_data;
+	// Get a valid reference to the session_data struct
+	s_data = __acquire_s_data(filp->private_data);
+
+	if (s_data == NULL) {
+		// Someone closed the file concurrently to the ioctl call
+		retval = -EBADFD;
+		goto exit;
+	}
 
 	switch (cmd) {
 	case SET_SEND_TIMEOUT:
@@ -552,8 +610,11 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		break;
 	default:
 		retval = -EINVAL;
-		goto exit;
+		break;
 	}
+
+	// Release the acquired reference
+	__release_s_data(s_data);
 
 	exit:
 	return retval;
