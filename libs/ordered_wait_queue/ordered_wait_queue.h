@@ -37,13 +37,14 @@ static inline void ordered_queue_insert(struct ordered_wait_queue *owq,
 		if (ktime_before(e->ts, x->ts))
 			break;
 	}
-	rcu_read_unlock();
 
 	mutex_lock(&(owq->lock));
 	// Add e to the list in front of x (list_add_tail_rcu, unlike the name might 
 	// suggest, does exactly this: assigns x->list.prev = &e and viceversa)
 	list_add_tail_rcu(&(e->list), &(x->list));
 	mutex_unlock(&(owq->lock));
+	
+	rcu_read_unlock();
 
 	atomic_inc(&(owq->population));
 }
@@ -76,14 +77,15 @@ static inline void ordered_queue_detach(struct ordered_wait_queue *owq,
 	rcu_read_lock();																\
 	last = list_entry_rcu((owq)->list.prev, struct ordered_wait_queue_entry, list);	\
 	last_ts = last->ts;																\
-	rcu_read_unlock();																\
 																					\
 	if (ktime_after(e.ts, last_ts))													\
 		ordered_queue_append(owq, &e);												\
 	else																			\
 		ordered_queue_insert(owq, &e);												\
 																					\
-	printk("	thread %d went to sleep", current->pid);					\
+	rcu_read_unlock();																\
+																					\
+	printk("	thread %d went to sleep", current->pid);							\
 	wait_ret = wait_event_interruptible_hrtimeout((owq)->wq, condition, timeout);	\
 	printk("	thread %d woke up, reason %d", current->pid, wait_ret);				\
 	ordered_queue_detach(owq, &e);													\
@@ -94,7 +96,9 @@ static inline void ordered_queue_detach(struct ordered_wait_queue *owq,
 // Picks the first task from the queue (if not empty) and wakes it up
 static void inline wake_up_ordered(struct ordered_wait_queue *owq) {
 	struct ordered_wait_queue_entry *f;
+	rcu_read_lock();
 	f = list_first_or_null_rcu(&(owq->list), struct ordered_wait_queue_entry, list);
+	rcu_read_unlock();
 	if (f != NULL) 
 		wake_up_process(f->tcb);
 }

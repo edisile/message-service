@@ -16,7 +16,7 @@ static int param_long_atomic_set(const char *val, const struct kernel_param *kp)
 
 	ret = kstrtol(val, 10, &v);
 	if (ret != 0 || v < 0)
-	return -EINVAL;
+		return -EINVAL;
 	
 	printk("Atomically setting parameter to value %ld", v);
 	atomic_long_set((atomic_long_t *) kp->arg, v);

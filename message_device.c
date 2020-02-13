@@ -43,7 +43,7 @@ static int dev_flush(struct file *filp, void *id);
 // Struct definitions
 
 // This will hold the messages in a queue
-struct queue_elem {
+struct mq_message {
 	unsigned char *message;
 	unsigned long mess_len;
 	struct lf_queue_node list;
@@ -73,14 +73,14 @@ struct file_data {
 // Used to store data necessary for the delayed write mechanism
 struct delayed_write_data {
 	struct delayed_work dwork;
-	struct queue_elem *elem;
+	struct mq_message *elem;
 	struct file_data *file;
 	struct timestamp *ts;
 };
 
 #define IOCTL_CODE 0x27
 
-// ioctl commands // FIXME: use the macros to make these
+// ioctl commands
 #define SET_SEND_TIMEOUT _IOW(IOCTL_CODE, 0x0f, long) // 9999
 #define SET_RECV_TIMEOUT _IOW(IOCTL_CODE, 0x10, long) // 10000
 #define REVOKE_DELAYED_MESSAGES _IO(IOCTL_CODE, 0x11) // 10001
@@ -158,32 +158,12 @@ static inline void __release_s_data(struct session_data *s_data) {
 
 // Opens an I/O session towards the device
 static int dev_open(struct inode *inode, struct file *filp) {
-	int retval = 0;
-
-	// if (__MINOR(filp) >= MINORS) {
-	// 	// Minor number not supported
-	// 	retval = -ENODEV;
-	// 	goto exit;
-	// }
-
-	// MAYBE: remove
-	// Increment usage count if there's any IO session towards files managed 
-	// by this module
-	// if (!try_module_get(THIS_MODULE)) {
-	// 	// Module might have been removed
-	// 	retval = -ENODEV;
-	// 	goto exit;
-	// }
-
 	printk("%s: device file opened\n", MODNAME);
-
-	// exit:
-	return retval;
+	return 0;
 }
 
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
-	// module_put(THIS_MODULE); // MAYBE: remove
 	struct session_data *s_data = __void_ptr_to_s_data_ptr(filp->private_data);
 
 	// s_data might have not been created for this structure
@@ -204,10 +184,10 @@ static int dev_release(struct inode *inode, struct file *filp) {
 	return 0;
 }
 
-// Stores the message provided in buff inside a queue_elem whose address is 
+// Stores the message provided in buff inside a mq_message whose address is 
 // placed at elem_addr while keeping the count of the bytes stored in the device
 static ssize_t __write_common(struct file_data *d, const char *buff, size_t len, 
-							struct queue_elem **elem_addr, bool delayed) {
+							struct mq_message **elem_addr, bool delayed) {
 	ssize_t retval;
 	long free_b, stored_b;
 	
@@ -229,7 +209,7 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 		goto retry;
 
 	// Allocate memory for the message
-	*elem_addr = vmalloc(sizeof(struct queue_elem));
+	*elem_addr = vmalloc(sizeof(struct mq_message));
 	if (elem_addr != NULL) {
 		(*elem_addr)->time = delayed ? ktime_get() : KTIME_MAX;
 		(*elem_addr)->message = vmalloc(len);
@@ -261,7 +241,7 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 }
 
 // Common implementation for pushing messages to the queue of a file
-static void inline __push_to_queue(struct file_data *d, struct queue_elem *e) {
+static void inline __push_to_queue(struct file_data *d, struct mq_message *e) {
 	lf_queue_push(&(d->message_queue), &(e->list));
 	wake_up_ordered(&(d->wait_queue)); // Wake up one thread on the wait queue
 }
@@ -270,7 +250,7 @@ static void inline __push_to_queue(struct file_data *d, struct queue_elem *e) {
 static ssize_t dev_write(struct file *filp, const char *buff, size_t len, 
 						loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
-	struct queue_elem *elem;
+	struct mq_message *elem;
 	ssize_t retval;
 
 	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
@@ -329,7 +309,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 								size_t len, loff_t *off) {
 	struct file_data *d = &files[__MINOR(filp)];
 	struct session_data *s_data;
-	struct queue_elem *elem;
+	struct mq_message *elem;
 	struct delayed_write_data *data = NULL;
 	bool ok;
 	ssize_t retval;
@@ -388,7 +368,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 static ssize_t __read_common(struct file_data *d, char *buff, size_t len, 
 							loff_t *off) {
 	struct lf_queue_node *node;
-	struct queue_elem *elem;
+	struct mq_message *elem;
 	ssize_t retval = 0;
 
 	printk("%s: read on [%d,%d]\n", MODNAME, MAJOR, (int) (d - files));
@@ -396,7 +376,7 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 	node = lf_queue_pull(&(d->message_queue));
 
 	if (node != NULL) {
-		elem = container_of(node, struct queue_elem, list);
+		elem = container_of(node, struct mq_message, list);
 
 		// buff == NULL means just flushing the message, useful when unmounting 
 		// the module in order to clean up
@@ -533,8 +513,7 @@ static long __alloc_session_data(struct file *filp) {
 			// try an atomic CAS on filp->private_data to set it to s_data,  
 			// if it fails dealloc and go to retry just to be sure
 			retval = atomic_long_cmpxchg((atomic_long_t *) &(filp->private_data), 
-										(long) NULL, 
-										(long) s_data);
+										(long) NULL, (long) s_data);
 
 			if ((void *) retval != NULL) {
 				vfree(ts);
