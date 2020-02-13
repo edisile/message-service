@@ -3,9 +3,9 @@
 #ifdef __KERNEL__
 	#include <linux/delay.h>
 	#define __sleep_range(min, max) (usleep_range(min, max))
-#else
+    #else
 	#include <unistd.h>
-	__sleep_range(min, max) (usleep((min + max) / 2))
+	#define __sleep_range(min, max) (usleep((min + max) / 2))
 #endif
 
 #define NEW_LF_QUEUE ((struct lf_queue) {.head = NULL, .tail = NULL})

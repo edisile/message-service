@@ -11,6 +11,7 @@
 #include "libs/lf_queue/lf_queue.h"
 #include "libs/atomic_long_kp/atomic_long_kp.h"
 #include "libs/timestamp/timestamp.h"
+#include "libs/ordered_wait_queue/ordered_wait_queue.h"
 
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
@@ -65,7 +66,7 @@ struct session_data {
 struct file_data {
 	struct lf_queue message_queue;
 	atomic_long_t stored_bytes;
-	struct wait_queue_head wait_queue;
+	struct ordered_wait_queue wait_queue;
 	ktime_t flush_time;
 };
 
@@ -77,12 +78,12 @@ struct delayed_write_data {
 	struct timestamp *ts;
 };
 
-// ioctl commands
-enum ioctl_cmds {
-	SET_SEND_TIMEOUT = 99,
-	SET_RECV_TIMEOUT,
-	REVOKE_DELAYED_MESSAGES
-};
+#define IOCTL_CODE 0x27
+
+// ioctl commands // FIXME: use the macros to make these
+#define SET_SEND_TIMEOUT _IOW(IOCTL_CODE, 0x0f, long) // 9999
+#define SET_RECV_TIMEOUT _IOW(IOCTL_CODE, 0x10, long) // 10000
+#define REVOKE_DELAYED_MESSAGES _IO(IOCTL_CODE, 0x11) // 10001
 
 // Globals
 static int MAJOR;
@@ -136,8 +137,8 @@ static struct file_operations f_ops[4] = {
 static inline struct session_data *__acquire_s_data(void *ptr) {
 	struct session_data *s_data = NULL;
 
-	if (ptr != NULL) {
-		s_data = __void_ptr_to_s_data_ptr(ptr);
+	s_data = __void_ptr_to_s_data_ptr(ptr);
+	if (s_data != NULL) {
 		atomic_inc(&(s_data->refs));
 	}
 	
@@ -262,7 +263,7 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 // Common implementation for pushing messages to the queue of a file
 static void inline __push_to_queue(struct file_data *d, struct queue_elem *e) {
 	lf_queue_push(&(d->message_queue), &(e->list));
-	wake_up(&(d->wait_queue)); // Wake up one thread on the wait queue
+	wake_up_ordered(&(d->wait_queue)); // Wake up one thread on the wait queue
 }
 
 // Posts a message on the message queue
@@ -276,10 +277,10 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 
 	retval = __write_common(d, buff, len, &elem, (bool) 0);
 	if (retval == -ENOMEM || retval == -ENOSPC)
-        goto exit;
+		goto exit;
 
 	__push_to_queue(d, elem);
-	
+
 	exit:
 	return retval;
 }
@@ -312,8 +313,8 @@ static void __delayed_work(struct work_struct *work) {
 		printk("%s: delayed push success\n", MODNAME);
 	} else {
 		printk("%s: delayed push aborted\n", MODNAME);
-        // Free the message and remove if from the stored bytes count
-        atomic_long_sub(data->elem->mess_len, &(data->file->stored_bytes));
+		// Free the message and remove if from the stored bytes count
+		atomic_long_sub(data->elem->mess_len, &(data->file->stored_bytes));
 		vfree(data->elem->message);
 		vfree(data->elem);
 	}
@@ -334,8 +335,8 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	ssize_t retval;
 
 	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
-	s_data = __acquire_s_data(filp->private_data);
 
+	s_data = __acquire_s_data(filp->private_data);
 	if (s_data == NULL) {
 		// s_data has been hidden/deallocated while closing the session
 		printk("%s: ts access from NULL s_data pointer", MODNAME);
@@ -388,39 +389,27 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 							loff_t *off) {
 	struct lf_queue_node *node;
 	struct queue_elem *elem;
-	bool flushed;
 	ssize_t retval = 0;
 
 	printk("%s: read on [%d,%d]\n", MODNAME, MAJOR, (int) (d - files));
 	
-	retry:
-	flushed = 0;
 	node = lf_queue_pull(&(d->message_queue));
 
 	if (node != NULL) {
 		elem = container_of(node, struct queue_elem, list);
 
-		// Check if message has been invalidated by a flush
-		// buff == NULL means just flushing the message anyway
-		if (ktime_after(elem->time, d->flush_time) && buff != NULL) {
+		// buff == NULL means just flushing the message, useful when unmounting 
+		// the module in order to clean up
+		if (buff != NULL) {
 			retval = len = min(len, elem->mess_len);
 			printk("	%lu bytes to read", len);
 			copy_to_user(buff, elem->message + *off, len);
-		} else {
-			printk("	%lu bytes flushed", len);
-			// Message was flushed because of time
-			if (ktime_before(elem->time, d->flush_time)) {
-				printk("	message written at %lld, flushed at %lld", elem->time, d->flush_time);
-				flushed = 1;
-			}
 		}
 
-        // Free the message and remove if from the stored bytes count
+		// Free the message and subtract it from the stored bytes count
 		atomic_long_sub(elem->mess_len, &(d->stored_bytes));
 		vfree(elem->message);
 		vfree(elem);
-
-		if (flushed) goto retry;
 	}
 
 	return retval;
@@ -435,7 +424,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len,
 
 // Read a message from the queue; if none is available wait for a time related 
 // to the I/O session
-// Threads will wait on a wait_queue dedicated to the file using 
+// Threads will wait on a ordered_wait_queue dedicated to the file using 
 // wait_event_hrtimeout; a wake_up call on the queue will wake up a single 
 // thread every time a new message is added
 static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len, 
@@ -450,13 +439,14 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	s_data = __acquire_s_data(filp->private_data);
 	if (s_data == NULL) {
 		// Someone closed the file concurrently to the read call
+		printk("%s: ts access from NULL s_data pointer", MODNAME);
 		return -EBADFD;
 	}
 
 	entry_time = wakeup_time = ktime_get();
 	timeout = s_data->recv_timeout;
 
-	printk("%s: read with timeout %lldns", MODNAME, timeout);
+	printk("%s: thread %d read with timeout %lldns", MODNAME, current->pid, timeout);
 
 	retry:	
 	// Compute remaining time to wait in case multiple wake-ups happen:
@@ -472,10 +462,10 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 
 	if (IS_EMPTY(d->message_queue)) {
 		// Wait until either a signal comes...
-		wait_ret = wait_event_interruptible_hrtimeout(d->wait_queue, 
+		wait_ret = wait_event_ordered_interruptible_hrtimeout(&(d->wait_queue), 
 				!IS_EMPTY(d->message_queue) || // ... queue is not empty...
 				(flushed = ktime_after(d->flush_time, entry_time)), // ... flush is requested...
-				timeout); // ... or timeout expires
+				entry_time, timeout); // ... or timeout expires
 	}
 
 	wakeup_time = ktime_get();
@@ -488,7 +478,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 		if (retval == 0 && !flushed) {
 			goto retry; // Someone else stole the message, try to sleep again
 		} else {
-            // Successful read or flush, return
+			// Successful read or flush, return
 			if (flushed) printk("%s: woke up because of flush", MODNAME);
 		}
 		break;
@@ -538,7 +528,7 @@ static long __alloc_session_data(struct file *filp) {
 				.refs = ATOMIC_INIT(1)
 			};
 
-			mutex_init(&(s_data->metadata_lock)); // MAYBE: change into rw_lock?
+			mutex_init(&(s_data->metadata_lock));
 			
 			// try an atomic CAS on filp->private_data to set it to s_data,  
 			// if it fails dealloc and go to retry just to be sure
@@ -570,6 +560,13 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
+	if (_IOC_TYPE(cmd) != IOCTL_CODE || 
+			_IOC_NR(cmd) < _IOC_NR(SET_SEND_TIMEOUT) ||
+			_IOC_NR(cmd) > _IOC_NR(REVOKE_DELAYED_MESSAGES)) {
+		printk("%s: bad ioctl command", MODNAME);
+		return -EINVAL;
+	}
+
 	// This session might not have an associated session_data struct yet
 	if (filp->private_data == NULL) {
 		retval = __alloc_session_data(filp);
@@ -581,15 +578,15 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	// Get a valid reference to the session_data struct
 	s_data = __acquire_s_data(filp->private_data);
-
 	if (s_data == NULL) {
 		// Someone closed the file concurrently to the ioctl call
+		printk("%s: ts access from NULL s_data pointer", MODNAME);
 		retval = -EBADFD;
 	}
 
-	switch (cmd) {
-	case SET_SEND_TIMEOUT:
-	case SET_RECV_TIMEOUT:
+	switch (_IOC_NR(cmd)) {
+	case _IOC_NR(SET_SEND_TIMEOUT):
+	case _IOC_NR(SET_RECV_TIMEOUT):
 		mutex_lock(&(s_data->metadata_lock));
 
 		if (cmd == SET_SEND_TIMEOUT)
@@ -602,11 +599,8 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 		mutex_unlock(&(s_data->metadata_lock));
 		break;
-	case REVOKE_DELAYED_MESSAGES:
+	case _IOC_NR(REVOKE_DELAYED_MESSAGES):
 		atomic_long_set((atomic_long_t *) &(s_data->ts->time), ktime_get());
-		break;
-	default:
-		retval = -EINVAL;
 		break;
 	}
 
@@ -631,7 +625,9 @@ static void __flush(struct file_data *d) {
 								f_time, now) != f_time)
 			goto retry; // Someone else changed the value, retry for safety
 	
-	wake_up_all(&(d->wait_queue));
+	printk("%s: flushing the workqueue\n", MODNAME);
+	wake_up_ordered_all(&(d->wait_queue));
+	flush_workqueue(work_queue); // BUG: this does fuck all if the d_works are not in the queue
 }
 
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
@@ -673,7 +669,7 @@ int init_module(void) {
 			.flush_time = ktime_set(0, 0) // Initial flush has time 0
 		};
 
-		init_waitqueue_head(&(files[i].wait_queue));
+		init_ordered_wait_queue(files[i].wait_queue);
 	}
 
 	return retval;

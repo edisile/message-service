@@ -6,6 +6,7 @@
         "list": "c",
         "module.h": "c",
         "queue": "c",
-        "errno.h": "c"
+        "errno.h": "c",
+        "ordered_wait_queue.h": "c"
     }
 }
