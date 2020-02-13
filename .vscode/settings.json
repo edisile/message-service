@@ -7,6 +7,8 @@
         "module.h": "c",
         "queue": "c",
         "errno.h": "c",
-        "ordered_wait_queue.h": "c"
+        "ordered_wait_queue.h": "c",
+        "ktime.h": "c",
+        "hr_work_queue.h": "c"
     }
 }

@@ -12,6 +12,7 @@
 #include "libs/atomic_long_kp/atomic_long_kp.h"
 #include "libs/timestamp/timestamp.h"
 #include "libs/ordered_wait_queue/ordered_wait_queue.h"
+#include "libs/hr_work_queue/hr_work_queue.h"
 
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
