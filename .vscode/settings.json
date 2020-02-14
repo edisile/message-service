@@ -9,6 +9,7 @@
         "errno.h": "c",
         "ordered_wait_queue.h": "c",
         "ktime.h": "c",
-        "hr_work_queue.h": "c"
+        "hr_work_queue.h": "c",
+        "mutex": "c"
     }
 }

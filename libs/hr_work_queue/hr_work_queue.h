@@ -32,31 +32,37 @@ struct hr_work {
 };
 
 
+// Needed to set up the sleeper
+#define __reset_sleeper(hr_sleeper) (hrtimer_init_sleeper(hr_sleeper,	\
+										CLOCK_MONOTONIC, HRTIMER_MODE_ABS))
+
 // Init work queue, wait_queue, timer and lock
-#define init_hr_work_queue(wq) ({											\
+#define init_hr_work_queue(wq) ({										\
 	INIT_LIST_HEAD(&(wq.list));											\
 	mutex_init(&(wq.lock));												\
 	init_waitqueue_head(&(wq.wait_q));									\
 	wq.daemon = NULL;													\
 	wq.next_wakeup = KTIME_MAX;											\
+	__reset_sleeper(&(wq.timer));										\
+	wq.timer.task = NULL; 												\
 })
 
 // Init a hr_work item
-#define INIT_HR_WORK(_work, _func, _time) ({								\
-	INIT_WORK(&(_work.work), _func);										\
-	_work.time = _time;												\
+#define INIT_HR_WORK(_work, _func, _time) ({							\
+	INIT_WORK(&(_work.work), _func);									\
+	_work.time = _time;													\
 })
 
 // Init a hr_work item to start at a delay relative to current time
-#define INIT_HR_WORK_REL(_work, _func, _delay) ({							\
-	INIT_WORK(&(_work.work), _func);										\
-	_work.time = ktime_add(_delay, ktime_get());							\
+#define INIT_HR_WORK_REL(_work, _func, _delay) ({						\
+	INIT_WORK(&(_work.work), _func);									\
+	_work.time = ktime_add(_delay, ktime_get());						\
 })
 
-#define hr_work_queue_active(wq) (wq.daemon != NULL)
+#define hr_work_queue_active(wq) ((wq)->daemon != NULL)
 
 // Start all hr_work for which condition is true
-#define start_work_if(hrwq, work_ptr, condition) ({							\
+#define start_work_if(hrwq, work_ptr, condition) ({						\
 	bool ok;															\
 	rcu_read_lock();													\
 	list_for_each_entry_rcu(work_ptr, &((hrwq)->list), list) {			\
@@ -76,7 +82,7 @@ struct hr_work {
 })
 
 // Start hr_work if condition is true, stop as soon as it becomes false
-#define start_work_if_stop_early(hrwq, work_ptr, condition) ({				\
+#define start_work_if_stop_early(hrwq, work_ptr, condition) ({			\
 	bool ok;															\
 	rcu_read_lock();													\
 	list_for_each_entry_rcu(work_ptr, &((hrwq)->list), list) {			\
@@ -106,8 +112,10 @@ static int daemon_work(void *hr_work_q) {
 	struct hr_work_queue *hrwq = (struct hr_work_queue *) hr_work_q;
 	struct hr_work *w;
 
+	hrwq->daemon = current; // This marks the queue as active
+
 	printk("hr_work_queue: daemon thread %d started", current->pid);
-	hrtimer_init_sleeper(&(hrwq->timer), CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+	__reset_sleeper(&(hrwq->timer));
 
 	for ( ; ; ) {
 		printk("hr_work_queue: daemon thread %d going to sleep", current->pid);
@@ -125,7 +133,7 @@ static int daemon_work(void *hr_work_q) {
 		}
 		
 		// Re-init the sleeper to sleep again at the next iteration
-		hrtimer_init_sleeper(&(hrwq->timer), CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+		__reset_sleeper(&(hrwq->timer));
 		
 		// Iterate on list and enqueue all works whose timestamp is before 
 		// current time
@@ -134,13 +142,13 @@ static int daemon_work(void *hr_work_q) {
 		// Try to restart the timer by checking if there's other hq_work queued
 		rcu_read_lock();
 		w = list_first_or_null_rcu(&(hrwq->list), struct hr_work, list);
-		rcu_read_unlock();
 		if (w != NULL) {
 			hrwq->next_wakeup = w->time; // TODO: make atomic
 			__sync_synchronize(); // MAYBE: is this sufficient?
 			hrtimer_start(&(hrwq->timer.timer), w->time, HRTIMER_MODE_ABS);
 		} else
 			hrwq->next_wakeup = KTIME_MAX;
+		rcu_read_unlock();
 	}
 }
 
@@ -177,24 +185,28 @@ static void queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 
 	// Should driver be restarted?
 	if (ktime_before(work->time, hrwq->next_wakeup)) {
+		printk("hr_work_queue: gotta reset timer after queueing work");
 		// Current work is more urgent, dearm and rearm the timer
 		if (hrtimer_try_to_cancel(&(hrwq->timer.timer)) >= 0) {
+			printk("hr_work_queue: timer cancelled");
 			hrwq->next_wakeup = work->time; // TODO: make atomic
 			__sync_synchronize(); // MAYBE: is this sufficient?
+			
+			while (!hr_work_queue_active(hrwq)) usleep_range(10, 50);
+			
 			hrtimer_start(&(hrwq->timer.timer), work->time, HRTIMER_MODE_ABS);
+			printk("hr_work_queue: timer restarted");
 		}
 	}
 }
 
-#define start_hr_work_queue(wq) ({													\
-	struct task_struct *tsk;														\
-	printk("hr_work_queue: taking lock");											\
-	mutex_lock(&(wq.lock));															\
-	if (!hr_work_queue_active(wq)) {												\
-		printk("hr_work_queue: starting");											\
-		tsk = kthread_run(daemon_work, &wq, "hr_q_worker");							\
-		printk("hr_work_queue: thread %d started", tsk->pid);						\
-		if (tsk != NULL) wq.daemon = tsk;											\
-	}																				\
-	mutex_unlock(&(wq.lock));														\
+#define start_hr_work_queue(wq) ({										\
+	struct task_struct *tsk;											\
+	printk("hr_work_queue: taking lock");								\
+	mutex_lock(&((wq)->lock));												\
+	if (!hr_work_queue_active(wq)) {									\
+		printk("hr_work_queue: starting");								\
+		tsk = kthread_run(daemon_work, wq, "hr_q_worker");				\
+	}																	\
+	mutex_unlock(&((wq)->lock));											\
 })

@@ -572,9 +572,9 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	case _IOC_NR(SET_SEND_TIMEOUT):
 		// First to request a send timeout will start the work queue cloning a 
 		// daemon thread
-		if (!hr_work_queue_active(d->work_queue)) {
+		if (!hr_work_queue_active(&(d->work_queue))) {
 			printk("%s: trying to start hr_work_queue", MODNAME);
-			start_hr_work_queue(d->work_queue);
+			start_hr_work_queue(&(d->work_queue));
 		}
 		// There's still need to set the timeout and timer, so...
 		// fall through
@@ -582,11 +582,13 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		mutex_lock(&(s_data->metadata_lock));
 		printk("%s: setting timeouts", MODNAME);
 
-		if (cmd == SET_SEND_TIMEOUT)
+		if (_IOC_NR(cmd) == _IOC_NR(SET_SEND_TIMEOUT))
 			s_data->send_timeout = ktime_set(0, arg * NSEC_PER_USEC);
 		else
 			s_data->recv_timeout = ktime_set(0, arg * NSEC_PER_USEC);
 		
+		printk("%s: correct driver is number %d", MODNAME, 
+				DRIVER_INDEX(s_data->send_timeout, s_data->recv_timeout));
 		// Select correct driver
 		filp->f_op = &f_ops[DRIVER_INDEX(s_data->send_timeout, s_data->recv_timeout)];
 
