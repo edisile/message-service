@@ -33,7 +33,7 @@ struct hr_work {
 
 
 // Init work queue, wait_queue, timer and lock
-#define init_hr_work_queue(wq) ({										\
+#define init_hr_work_queue(wq) ({											\
 	INIT_LIST_HEAD(&(wq.list));											\
 	mutex_init(&(wq.lock));												\
 	init_waitqueue_head(&(wq.wait_q));									\
@@ -41,10 +41,23 @@ struct hr_work {
 	wq.next_wakeup = KTIME_MAX;											\
 })
 
+// Init a hr_work item
+#define INIT_HR_WORK(_work, _func, _time) ({								\
+	INIT_WORK(&(_work.work), _func);										\
+	_work.time = _time;												\
+})
+
+// Init a hr_work item to start at a delay relative to current time
+#define INIT_HR_WORK_REL(_work, _func, _delay) ({							\
+	INIT_WORK(&(_work.work), _func);										\
+	_work.time = ktime_add(_delay, ktime_get());							\
+})
+
 #define hr_work_queue_active(wq) (wq.daemon != NULL)
 
 // Start all hr_work for which condition is true
-#define start_work_if(hrwq, work_ptr, condition) ({						\
+#define start_work_if(hrwq, work_ptr, condition) ({							\
+	bool ok;															\
 	rcu_read_lock();													\
 	list_for_each_entry_rcu(work_ptr, &((hrwq)->list), list) {			\
 		if (condition) {												\
@@ -54,13 +67,17 @@ struct hr_work {
 			printk("hr_work_queue: queuing work with time %lld at %lld",\
 					work_ptr->time, ktime_get());						\
 			queue_work(system_unbound_wq, &(work_ptr->work));			\
+			if (!ok)													\
+				/* Fallback, execute work locally */					\
+				work_ptr->work.func(&(work_ptr->work));					\
 		}																\
 	}																	\
 	rcu_read_unlock();													\
 })
 
-// Start hr_work if condition is true, when it becomes false stop iterating
-#define start_work_if_stop_early(hrwq, work_ptr, condition) ({			\
+// Start hr_work if condition is true, stop as soon as it becomes false
+#define start_work_if_stop_early(hrwq, work_ptr, condition) ({				\
+	bool ok;															\
 	rcu_read_lock();													\
 	list_for_each_entry_rcu(work_ptr, &((hrwq)->list), list) {			\
 		if (condition) {												\
@@ -69,7 +86,10 @@ struct hr_work {
 			mutex_unlock(&((hrwq)->lock));								\
 			printk("hr_work_queue: queuing work with time %lld at %lld",\
 					work_ptr->time, ktime_get());						\
-			queue_work(system_unbound_wq, &(work_ptr->work));			\
+			ok = queue_work(system_unbound_wq, &(work_ptr->work));		\
+			if (!ok)													\
+				/* Fallback, execute work locally */					\
+				work_ptr->work.func(&(work_ptr->work));					\
 		} else {														\
 			break;														\
 		}																\

@@ -54,7 +54,7 @@ struct mq_message {
 // Data related to a single I/O session, will be stored in the private_data 
 // pointer of the file struct
 struct session_data {
-	unsigned long send_timeout;
+	ktime_t send_timeout;
 	ktime_t recv_timeout;
 	struct mutex metadata_lock;
 	struct timestamp *ts;
@@ -74,7 +74,7 @@ struct file_data {
 
 // Used to store data necessary for the delayed write mechanism
 struct delayed_write_data {
-	struct delayed_work dwork; // TODO: change to struct hr_work
+	struct hr_work hrwork; // DONE: change to struct hr_work
 	struct mq_message *elem;
 	struct file_data *file;
 	struct timestamp *ts;
@@ -272,11 +272,11 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 // queue; before pushing, it checks if the push has been aborted by an ioctl 
 // REVOKE_DELAYED_MESSAGES request or a flush
 static void __delayed_work(struct work_struct *work) {
-	struct delayed_work *d_work; // TODO: change to struct hr_work
+	// struct hr_work *hrw; // DONE: change to struct hr_work
 	struct delayed_write_data *data;
 
-	d_work = container_of(work, struct delayed_work, work);
-	data = container_of(d_work, struct delayed_write_data, dwork);
+	// hrw = container_of(work, struct hr_work, work);
+	data = container_of(work, struct delayed_write_data, hrwork.work);
 
 	printk("%s: delayed func call\n", MODNAME);
 
@@ -314,7 +314,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	struct session_data *s_data;
 	struct mq_message *elem;
 	struct delayed_write_data *data = NULL;
-	bool ok;
+	// bool ok;
 	ssize_t retval;
 
 	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
@@ -342,15 +342,16 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	data->ts = s_data->ts;
 	// The timestamp will be referenced by another delayed work, acquire it
 	__acquire_timestamp(s_data->ts);
-	// TODO: use hr_work API
-	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
+	// DONE: use hr_work API
+	INIT_HR_WORK_REL(data->hrwork, __delayed_work, s_data->send_timeout);
+	queue_hr_work(&(d->work_queue), &(data->hrwork));
 
-	ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
-	if (!ok) {
-		__release_timestamp(s_data->ts); // The ts reference is no more
-		retval = -EAGAIN;
-		goto cleanup;
-	}
+	// ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
+	// if (!ok) {
+	// 	__release_timestamp(s_data->ts); // The ts reference is no more
+	// 	retval = -EAGAIN;
+	// 	goto cleanup;
+	// }
 
 	printk("%s: work enqueued, 0x%p\n", MODNAME, data);
 
@@ -579,9 +580,10 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		// fall through
 	case _IOC_NR(SET_RECV_TIMEOUT):
 		mutex_lock(&(s_data->metadata_lock));
+		printk("%s: setting timeouts", MODNAME);
 
 		if (cmd == SET_SEND_TIMEOUT)
-			s_data->send_timeout = arg;
+			s_data->send_timeout = ktime_set(0, arg * NSEC_PER_USEC);
 		else
 			s_data->recv_timeout = ktime_set(0, arg * NSEC_PER_USEC);
 		
