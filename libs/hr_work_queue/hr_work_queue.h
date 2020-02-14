@@ -72,7 +72,7 @@ struct hr_work {
 			mutex_unlock(&((hrwq)->lock));								\
 			printk("hr_work_queue: queuing work with time %lld at %lld",\
 					work_ptr->time, ktime_get());						\
-			queue_work(system_unbound_wq, &(work_ptr->work));			\
+			ok = queue_work(system_unbound_wq, &(work_ptr->work));		\
 			if (!ok)													\
 				/* Fallback, execute work locally */					\
 				work_ptr->work.func(&(work_ptr->work));					\
@@ -101,6 +101,15 @@ struct hr_work {
 		}																\
 	}																	\
 	rcu_read_unlock();													\
+})
+
+// Stop the hr_work_queue: cancel the timer, kill the daemon then start all 
+// residual works in the queue
+#define destroy_hr_work_queue(wq) ({ \
+	struct hr_work *w;														\
+	hrtimer_cancel(&(wq.timer.timer));										\
+	kthread_stop(wq.daemon);												\
+	start_work_if(&wq, w, 1);												\
 })
 
 // Daemon work
@@ -143,8 +152,8 @@ static int daemon_work(void *hr_work_q) {
 		rcu_read_lock();
 		w = list_first_or_null_rcu(&(hrwq->list), struct hr_work, list);
 		if (w != NULL) {
-			hrwq->next_wakeup = w->time; // TODO: make atomic
-			__sync_synchronize(); // MAYBE: is this sufficient?
+			hrwq->next_wakeup = w->time; // MAYBE: make atomic
+			__sync_synchronize(); // is this sufficient?
 			hrtimer_start(&(hrwq->timer.timer), w->time, HRTIMER_MODE_ABS);
 		} else
 			hrwq->next_wakeup = KTIME_MAX;
@@ -155,9 +164,14 @@ static int daemon_work(void *hr_work_q) {
 // Push to queue
 // Iterate on the list and insert the new hr_work; if this work is the first in 
 // queue cancel the timer and set it to the new time
-static void queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
+static bool queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 	struct hr_work *w, *last;
 	struct list_head *head;
+
+	if (!hr_work_queue_active(hrwq)) {
+		printk("hr_work_queue: can't add to an inactive queue!");
+		return (bool) 0;
+	}
 
 	rcu_read_lock();
 
@@ -189,8 +203,8 @@ static void queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 		// Current work is more urgent, dearm and rearm the timer
 		if (hrtimer_try_to_cancel(&(hrwq->timer.timer)) >= 0) {
 			printk("hr_work_queue: timer cancelled");
-			hrwq->next_wakeup = work->time; // TODO: make atomic
-			__sync_synchronize(); // MAYBE: is this sufficient?
+			hrwq->next_wakeup = work->time; // MAYBE: make atomic
+			__sync_synchronize(); // is this sufficient?
 			
 			while (!hr_work_queue_active(hrwq)) usleep_range(10, 50);
 			
@@ -198,15 +212,17 @@ static void queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 			printk("hr_work_queue: timer restarted");
 		}
 	}
+
+	return (bool) 1;
 }
 
 #define start_hr_work_queue(wq) ({										\
 	struct task_struct *tsk;											\
 	printk("hr_work_queue: taking lock");								\
-	mutex_lock(&((wq)->lock));												\
+	mutex_lock(&((wq)->lock));											\
 	if (!hr_work_queue_active(wq)) {									\
 		printk("hr_work_queue: starting");								\
 		tsk = kthread_run(daemon_work, wq, "hr_q_worker");				\
 	}																	\
-	mutex_unlock(&((wq)->lock));											\
+	mutex_unlock(&((wq)->lock));										\
 })

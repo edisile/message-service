@@ -74,7 +74,7 @@ struct file_data {
 
 // Used to store data necessary for the delayed write mechanism
 struct delayed_write_data {
-	struct hr_work hrwork; // DONE: change to struct hr_work
+	struct hr_work hrwork;
 	struct mq_message *elem;
 	struct file_data *file;
 	struct timestamp *ts;
@@ -271,10 +271,8 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 // queue; before pushing, it checks if the push has been aborted by an ioctl 
 // REVOKE_DELAYED_MESSAGES request or a flush
 static void __delayed_work(struct work_struct *work) {
-	// struct hr_work *hrw; // DONE: change to struct hr_work
 	struct delayed_write_data *data;
 
-	// hrw = container_of(work, struct hr_work, work);
 	data = container_of(work, struct delayed_write_data, hrwork.work);
 
 	printk("%s: delayed func call\n", MODNAME);
@@ -313,7 +311,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	struct session_data *s_data;
 	struct mq_message *elem;
 	struct delayed_write_data *data = NULL;
-	// bool ok;
+	bool ok;
 	ssize_t retval;
 
 	printk("%s: delayed write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
@@ -341,16 +339,15 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	data->ts = s_data->ts;
 	// The timestamp will be referenced by another delayed work, acquire it
 	__acquire_timestamp(s_data->ts);
-	// DONE: use hr_work API
-	INIT_HR_WORK_REL(data->hrwork, __delayed_work, s_data->send_timeout);
-	queue_hr_work(&(d->work_queue), &(data->hrwork));
 
-	// ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
-	// if (!ok) {
-	// 	__release_timestamp(s_data->ts); // The ts reference is no more
-	// 	retval = -EAGAIN;
-	// 	goto cleanup;
-	// }
+	INIT_HR_WORK_REL(data->hrwork, __delayed_work, s_data->send_timeout);
+	ok = queue_hr_work(&(d->work_queue), &(data->hrwork));
+
+	if (!ok) {
+		__release_timestamp(s_data->ts); // The ts reference is no more
+		retval = -EAGAIN;
+		goto cleanup;
+	}
 
 	printk("%s: work enqueued, 0x%p\n", MODNAME, data);
 
@@ -534,6 +531,18 @@ static long __alloc_session_data(struct file *filp) {
 	return retval;
 }
 
+#define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, hrwork))
+
+static inline void __revoke(struct timestamp *ts, struct hr_work_queue *wq) {
+	struct hr_work *w;
+
+	// Start all work items whose struct timestamp pointer is the one of the 
+	// session and would have been valid at a time later than ts->time; works are 
+	// built as to auto-deallocate themselves if this happens
+	start_work_if(wq, w, (dwd_from_work(w)->ts == ts) && 
+					ktime_after(w->time, ts->time));
+}
+
 // Changes the device operation mode according to cmd and, if necessary, the 
 // value of arg
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
@@ -595,9 +604,8 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		break;
 	case _IOC_NR(REVOKE_DELAYED_MESSAGES):
 		atomic_long_set((atomic_long_t *) &(s_data->ts->time), ktime_get());
-		// TODO: implement a wrapper for start_work_if to flush the queued works 
-		// whose ts reference points to s_data->ts and those time is after 
-		// s_data->ts
+		__revoke(s_data->ts, &(d->work_queue));
+		
 		break;
 	}
 
@@ -611,21 +619,29 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 // threads; all the delayed operations will flush their messages when they will 
 // execute and delayed messages on the queue will be flushed upon read
 static void __flush(struct file_data *d) {
-	ktime_t f_time; // Current flush time
+	ktime_t old_flush; // Old flush time
 	ktime_t now = ktime_get();
+	struct hr_work *w;
+
+	// Start all work items whose struct timestamp pointer is the one of the 
+	// session and would have been valid at a time later than ts->time
 
 	retry:
 	printk("%s: setting flush timestamp to %lld\n", MODNAME, now);
-	f_time = d->flush_time;
-	if (ktime_after(now, f_time))
+	old_flush = d->flush_time;
+	if (ktime_after(now, old_flush))
 		if (atomic_long_cmpxchg((atomic_long_t *) &(d->flush_time), 
-								f_time, now) != f_time)
+								old_flush, now) != old_flush)
 			goto retry; // Someone else changed the value, retry for safety
 	
-	printk("%s: flushing the workqueue\n", MODNAME);
 	wake_up_ordered_all(&(d->wait_queue));
-	// TODO: implement a wrapper for start_work_if to do this vvv
-	// flush_workqueue(work_queue); // BUG: this does fuck all if the d_works are not in the queue
+
+	// Start all work items that would have been valid at a time later than the 
+	// current flush time; works are built as to auto-deallocate themselves if 
+	// this happens
+	printk("%s: flushing the workqueue\n", MODNAME);
+	start_work_if(&(d->work_queue), w, ktime_after(w->time, d->flush_time));
+	
 }
 
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
@@ -670,26 +686,23 @@ int init_module(void) {
 void cleanup_module(void) {
 	int i;
 
+	__unregister_chrdev(MAJOR, 0, MINORS, DEVICE_NAME);
+	printk("%s: unregistered device\n", MODNAME);
+
 	// Flush all files; sets all delayed work to flush their messages and wakes 
 	// up any readers that are still waiting
+	printk("%s: flushing work queue\n", MODNAME);
 	for (i = 0; i < MINORS; i++) {
 		__flush(&(files[i]));
 	}
-
-	// Flush all work in the queue before destroying it
-	printk("%s: flushing work queue\n", MODNAME);
-	// flush_workqueue(work_queue); // TODO: change
-	// destroy_workqueue(work_queue); // TODO: remove
-
-	__unregister_chrdev(MAJOR, 0, MINORS, DEVICE_NAME);
-	printk("%s: unregistered\n", MODNAME);
 
 	for (i = 0; i < MINORS; i++) {
 		printk("%s: cleaning device #%d\n", MODNAME, i);
 		// Stop all hr_work_queue daemons
 		if (files[i].work_queue.daemon) {
-			kthread_stop(files[i].work_queue.daemon);
+			destroy_hr_work_queue(files[i].work_queue);
 		}
+
 		// calling __read_common with buff == NULL just flushes the message 
 		// from the queue
 		while (__read_common(&files[i], NULL, 1, NULL) > 0);
