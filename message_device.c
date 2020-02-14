@@ -68,23 +68,24 @@ struct file_data {
 	struct lf_queue message_queue;
 	atomic_long_t stored_bytes;
 	struct ordered_wait_queue wait_queue;
+	struct hr_work_queue work_queue;
 	ktime_t flush_time;
 };
 
 // Used to store data necessary for the delayed write mechanism
 struct delayed_write_data {
-	struct delayed_work dwork;
+	struct delayed_work dwork; // TODO: change to struct hr_work
 	struct mq_message *elem;
 	struct file_data *file;
 	struct timestamp *ts;
 };
 
-#define IOCTL_CODE 0x27
 
 // ioctl commands
-#define SET_SEND_TIMEOUT _IOW(IOCTL_CODE, 0x0f, long) // 9999
-#define SET_RECV_TIMEOUT _IOW(IOCTL_CODE, 0x10, long) // 10000
-#define REVOKE_DELAYED_MESSAGES _IO(IOCTL_CODE, 0x11) // 10001
+#define IOCTL_CODE 0x27 // 9984 as base
+#define SET_SEND_TIMEOUT _IOW(IOCTL_CODE, 0x0f, long) // 9984 + 15 = 9999
+#define SET_RECV_TIMEOUT _IOW(IOCTL_CODE, 0x10, long) // 9984 + 16 = 10000
+#define REVOKE_DELAYED_MESSAGES _IO(IOCTL_CODE, 0x11) // 9984 + 17 = 10001
 
 // Globals
 static int MAJOR;
@@ -94,7 +95,7 @@ static int MAJOR;
 static atomic_long_t max_message_size = ATOMIC_LONG_INIT(512);
 static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(4096);
 static struct file_data files[MINORS];
-static struct workqueue_struct *work_queue;
+static struct workqueue_struct *work_queue; // TODO: remove
 
 // Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is a 
 // custom kernel_param_ops struct that implements a atomic set on variables of
@@ -131,7 +132,8 @@ static struct file_operations f_ops[4] = {
 // Get the index of the correct driver based on send and receive timeout values
 #define DRIVER_INDEX(st, rt) (((rt ? 0x1 : 0) | (st ? 0x2 : 0)))
 
-// Helper methods for acquiring and releasing references to a session_data struct
+// Helper functions for acquiring and releasing references to a session_data 
+// struct
 
 // Converts a void pointer like void *file::private_data to an s_data pointer 
 // while counting references to this struct
@@ -270,7 +272,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 // queue; before pushing, it checks if the push has been aborted by an ioctl 
 // REVOKE_DELAYED_MESSAGES request or a flush
 static void __delayed_work(struct work_struct *work) {
-	struct delayed_work *d_work;
+	struct delayed_work *d_work; // TODO: change to struct hr_work
 	struct delayed_write_data *data;
 
 	d_work = container_of(work, struct delayed_work, work);
@@ -287,7 +289,7 @@ static void __delayed_work(struct work_struct *work) {
 	}
 
 	// Check if push was aborted in the meantime: if the message timestamp 
-	// comes after the last flush or last revoke push it to the queue
+	// comes after the last flush and last revoke push it to the queue
 	if (ktime_after(data->elem->time, data->file->flush_time) &&
 			ktime_after(data->elem->time, data->ts->time)) {
 		__push_to_queue(data->file, data->elem);
@@ -340,7 +342,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	data->ts = s_data->ts;
 	// The timestamp will be referenced by another delayed work, acquire it
 	__acquire_timestamp(s_data->ts);
-
+	// TODO: use hr_work API
 	INIT_DELAYED_WORK(&(data->dwork), __delayed_work);
 
 	ok = queue_delayed_work(work_queue, &(data->dwork), s_data->send_timeout);
@@ -537,6 +539,7 @@ static long __alloc_session_data(struct file *filp) {
 static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	long retval = 0;
 	struct session_data *s_data;
+	struct file_data *d = &files[__MINOR(filp)];
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
@@ -566,6 +569,14 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 	switch (_IOC_NR(cmd)) {
 	case _IOC_NR(SET_SEND_TIMEOUT):
+		// First to request a send timeout will start the work queue cloning a 
+		// daemon thread
+		if (!hr_work_queue_active(d->work_queue)) {
+			printk("%s: trying to start hr_work_queue", MODNAME);
+			start_hr_work_queue(d->work_queue);
+		}
+		// There's still need to set the timeout and timer, so...
+		// fall through
 	case _IOC_NR(SET_RECV_TIMEOUT):
 		mutex_lock(&(s_data->metadata_lock));
 
@@ -581,6 +592,9 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		break;
 	case _IOC_NR(REVOKE_DELAYED_MESSAGES):
 		atomic_long_set((atomic_long_t *) &(s_data->ts->time), ktime_get());
+		// TODO: implement a wrapper for start_work_if to flush the queued works 
+		// whose ts reference points to s_data->ts and those time is after 
+		// s_data->ts
 		break;
 	}
 
@@ -607,6 +621,7 @@ static void __flush(struct file_data *d) {
 	
 	printk("%s: flushing the workqueue\n", MODNAME);
 	wake_up_ordered_all(&(d->wait_queue));
+	// TODO: implement a wrapper for start_work_if to do this vvv
 	flush_workqueue(work_queue); // BUG: this does fuck all if the d_works are not in the queue
 }
 
@@ -634,6 +649,7 @@ int init_module(void) {
 
 	printk("%s: registered as %d\n", MODNAME, MAJOR);
 
+	// TODO: remove this vvv
 	work_queue = alloc_workqueue("delayed_queue", WQ_UNBOUND, 0);
 	if (work_queue == NULL) {
 		// Work queue was not allocated due to kzalloc failure, return with a 
@@ -650,6 +666,7 @@ int init_module(void) {
 		};
 
 		init_ordered_wait_queue(files[i].wait_queue);
+		init_hr_work_queue(files[i].work_queue);
 	}
 
 	return retval;
@@ -666,14 +683,18 @@ void cleanup_module(void) {
 
 	// Flush all work in the queue before destroying it
 	printk("%s: flushing work queue\n", MODNAME);
-	flush_workqueue(work_queue);
-	destroy_workqueue(work_queue);
+	flush_workqueue(work_queue); // TODO: change
+	destroy_workqueue(work_queue); // TODO: remove
 
 	__unregister_chrdev(MAJOR, 0, MINORS, DEVICE_NAME);
 	printk("%s: unregistered\n", MODNAME);
 
 	for (i = 0; i < MINORS; i++) {
 		printk("%s: cleaning device #%d\n", MODNAME, i);
+		// Stop all hr_work_queue daemons
+		if (files[i].work_queue.daemon) {
+			kthread_stop(files[i].work_queue.daemon);
+		}
 		// calling __read_common with buff == NULL just flushes the message 
 		// from the queue
 		while (__read_common(&files[i], NULL, 1, NULL) > 0);

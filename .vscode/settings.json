@@ -1,8 +1,8 @@
 {
     "files.associations": {
-        "typeinfo": "cpp",
-        "random": "cpp",
-        "tuple": "cpp",
+        "typeinfo": "c",
+        "random": "c",
+        "tuple": "c",
         "list": "c",
         "module.h": "c",
         "queue": "c",
