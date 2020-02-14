@@ -95,7 +95,6 @@ static int MAJOR;
 static atomic_long_t max_message_size = ATOMIC_LONG_INIT(512);
 static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(4096);
 static struct file_data files[MINORS];
-static struct workqueue_struct *work_queue; // TODO: remove
 
 // Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is a 
 // custom kernel_param_ops struct that implements a atomic set on variables of
@@ -626,7 +625,7 @@ static void __flush(struct file_data *d) {
 	printk("%s: flushing the workqueue\n", MODNAME);
 	wake_up_ordered_all(&(d->wait_queue));
 	// TODO: implement a wrapper for start_work_if to do this vvv
-	flush_workqueue(work_queue); // BUG: this does fuck all if the d_works are not in the queue
+	// flush_workqueue(work_queue); // BUG: this does fuck all if the d_works are not in the queue
 }
 
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
@@ -652,14 +651,6 @@ int init_module(void) {
 	}
 
 	printk("%s: registered as %d\n", MODNAME, MAJOR);
-
-	// TODO: remove this vvv
-	work_queue = alloc_workqueue("delayed_queue", WQ_UNBOUND, 0);
-	if (work_queue == NULL) {
-		// Work queue was not allocated due to kzalloc failure, return with a 
-		// "no memory" error
-		return -ENOMEM;
-	}
 
 	// Initialize the data struct for all possible file instances
 	for (i = 0; i < MINORS; i++) {
@@ -687,8 +678,8 @@ void cleanup_module(void) {
 
 	// Flush all work in the queue before destroying it
 	printk("%s: flushing work queue\n", MODNAME);
-	flush_workqueue(work_queue); // TODO: change
-	destroy_workqueue(work_queue); // TODO: remove
+	// flush_workqueue(work_queue); // TODO: change
+	// destroy_workqueue(work_queue); // TODO: remove
 
 	__unregister_chrdev(MAJOR, 0, MINORS, DEVICE_NAME);
 	printk("%s: unregistered\n", MODNAME);
