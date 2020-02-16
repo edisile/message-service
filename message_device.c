@@ -194,6 +194,8 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	long free_b, stored_b;
 	
 	if (len > atomic_long_read(&max_message_size)) {
+		printk("%s: message too big; %luB message, %ldB max size\n", MODNAME, 
+				len, atomic_long_read(&max_message_size));
 		return -EMSGSIZE;
 	}
 
@@ -204,9 +206,10 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 	free_b = atomic_long_read(&max_storage_size) - stored_b;
 	
 	if (len > free_b) {
+		printk("%s: message too big; %luB message, %ldB available space\n", 
+				MODNAME, len, free_b);
 		return -ENOSPC;
 	}
-
 	if (atomic_long_cmpxchg(&(d->stored_bytes), stored_b, stored_b + len) != stored_b)
 		goto retry;
 
@@ -223,9 +226,9 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 		goto cleanup;
 	}
 
-	printk("	%lu bytes to write", len);
+	printk("%s:	%lu bytes to write", MODNAME, len);
 	if (copy_from_user((*elem_addr)->message, buff, len) != 0) {
-		printk("	failure to copy all bytes");
+		printk("%s:	failure to copy all bytes, aborting write", MODNAME);
 		retval = -EFAULT;
 		goto cleanup;
 	}
@@ -258,8 +261,15 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
 
 	retval = __write_common(d, buff, len, &elem, (bool) 0);
-	if (retval == -ENOMEM || retval == -ENOSPC)
+
+	// Check if message storing failed for any reason
+	switch (retval) {
+	case -ENOMEM:
+	case -ENOSPC:
+	case -EMSGSIZE:
+	case -EFAULT:
 		goto exit;
+	}
 
 	__push_to_queue(d, elem);
 
