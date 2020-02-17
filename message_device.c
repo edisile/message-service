@@ -347,8 +347,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	data->elem = elem;
 	data->file = d;
 	// The timestamp will be referenced by another delayed work, acquire it
-	__acquire_timestamp(s_data->ts);
-	data->ts = s_data->ts;
+	data->ts = __acquire_timestamp(s_data->ts);
 	data->post_time = curr_time;
 
 	INIT_HR_WORK_REL(data->hrwork, __delayed_work, s_data->send_timeout);

@@ -7,5 +7,5 @@ struct timestamp {
 	atomic_t refs;
 };
 
-#define __acquire_timestamp(ts) (atomic_inc(&(ts->refs)))
+#define __acquire_timestamp(ts) ({atomic_inc(&(ts->refs)); ts;})
 #define __release_timestamp(ts) if (atomic_dec_and_test(&ts->refs)) vfree(ts)
