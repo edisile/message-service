@@ -10,6 +10,18 @@
         "ordered_wait_queue.h": "c",
         "ktime.h": "c",
         "hr_work_queue.h": "c",
-        "mutex": "c"
+        "mutex": "c",
+        "ctime": "c",
+        "*.tcc": "c",
+        "chrono": "c",
+        "future": "c",
+        "iomanip": "c",
+        "limits": "c",
+        "numeric": "c",
+        "ratio": "c",
+        "streambuf": "c",
+        "type_traits": "c",
+        "utility": "c",
+        "condition_variable": "c"
     }
 }

@@ -80,6 +80,7 @@ struct delayed_write_data {
 	struct timestamp *ts;
 };
 
+#define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, hrwork))
 
 // ioctl commands
 #define IOCTL_CODE 0x27 // 9984 as base
@@ -99,8 +100,8 @@ static struct file_data files[MINORS];
 // Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is a 
 // custom kernel_param_ops struct that implements a atomic set on variables of
 // atomic_long_t type
-module_param_cb(max_message_size, &atomic_long_param_ops, &max_message_size, 0660);
-module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 0660);
+module_param_cb(max_message_size, &atomic_long_param_ops, &max_message_size, 0664);
+module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 0664);
 
 
 // Macro to create a struct containing a driver instance
@@ -268,12 +269,11 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 	case -ENOSPC:
 	case -EMSGSIZE:
 	case -EFAULT:
-		goto exit;
+		break;
+	default:
+		__push_to_queue(d, elem);
 	}
 
-	__push_to_queue(d, elem);
-
-	exit:
 	return retval;
 }
 
@@ -388,10 +388,10 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 	if (node != NULL) {
 		elem = container_of(node, struct mq_message, list);
 
+		retval = len = min(len, elem->mess_len);
 		// buff == NULL means just flushing the message, useful when unmounting 
 		// the module in order to clean up
 		if (buff != NULL) {
-			retval = len = min(len, elem->mess_len);
 			printk("	%lu bytes to read", len);
 			copy_to_user(buff, elem->message + *off, len);
 		}
@@ -540,8 +540,6 @@ static long __alloc_session_data(struct file *filp) {
 
 	return retval;
 }
-
-#define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, hrwork))
 
 static inline void __revoke(struct timestamp *ts, struct hr_work_queue *wq) {
 	struct hr_work *w;
