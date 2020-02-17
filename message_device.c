@@ -48,7 +48,6 @@ struct mq_message {
 	unsigned char *message;
 	unsigned long mess_len;
 	struct lf_queue_node list;
-	ktime_t time;
 };
 
 // Data related to a single I/O session, will be stored in the private_data 
@@ -78,6 +77,7 @@ struct delayed_write_data {
 	struct mq_message *elem;
 	struct file_data *file;
 	struct timestamp *ts;
+	ktime_t post_time;
 };
 
 #define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, hrwork))
@@ -97,9 +97,9 @@ static atomic_long_t max_message_size = ATOMIC_LONG_INIT(512);
 static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(4096);
 static struct file_data files[MINORS];
 
-// Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is a 
-// custom kernel_param_ops struct that implements a atomic set on variables of
-// atomic_long_t type
+// Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is 
+// a custom kernel_param_ops struct that implements a atomic set on variables 
+// of atomic_long_t type
 module_param_cb(max_message_size, &atomic_long_param_ops, &max_message_size, 0664);
 module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 0664);
 
@@ -116,8 +116,8 @@ module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 066
 })
 
 // A table that holds all the possible drivers; when adding a timeout for reads 
-// or writes the f_op in the file struct will be changed to point to one of 
-// these driver instances
+// or writes the f_op pointer in the file struct will be changed to point to 
+// one of these driver instances
 static struct file_operations f_ops[4] = {
 	// No-timeout read and write
 	DEFINE_DRIVER_INSTANCE(dev_read, dev_write),
@@ -191,8 +191,9 @@ static int dev_release(struct inode *inode, struct file *filp) {
 // placed at elem_addr while keeping the count of the bytes stored in the device
 static ssize_t __write_common(struct file_data *d, const char *buff, size_t len, 
 							struct mq_message **elem_addr, bool delayed) {
-	ssize_t retval;
+	unsigned char *message;
 	long free_b, stored_b;
+	ssize_t retval;
 	
 	if (len > atomic_long_read(&max_message_size)) {
 		printk("%s: message too big; %luB message, %ldB max size\n", MODNAME, 
@@ -216,31 +217,29 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 
 	// Allocate memory for the message
 	*elem_addr = vmalloc(sizeof(struct mq_message));
-	if (elem_addr != NULL) {
-		(*elem_addr)->time = delayed ? ktime_get() : KTIME_MAX;
-		(*elem_addr)->message = vmalloc(len);
-	}
+	message = vmalloc(len);
 
-	if (*elem_addr == NULL || (*elem_addr)->message == NULL) {
+	if (*elem_addr == NULL || message == NULL) {
 		// Allocations failed, exit with an error
 		retval = -ENOMEM;
 		goto cleanup;
 	}
 
 	printk("%s:	%lu bytes to write", MODNAME, len);
-	if (copy_from_user((*elem_addr)->message, buff, len) != 0) {
+	if (copy_from_user(message, buff, len) != 0) {
 		printk("%s:	failure to copy all bytes, aborting write", MODNAME);
 		retval = -EFAULT;
 		goto cleanup;
 	}
 
+	(*elem_addr)->message = message;
 	retval = (*elem_addr)->mess_len = len;
 
 	return retval;
 
 	cleanup:
 	if (*elem_addr != NULL) vfree(*elem_addr);
-	if ((*elem_addr)->message != NULL) vfree((*elem_addr)->message);
+	if (message != NULL) vfree(message);
 	// Message posting failed, free the pre-reserved space
 	atomic_long_sub(len, &(d->stored_bytes));
 	return retval;
@@ -287,18 +286,18 @@ static void __delayed_work(struct work_struct *work) {
 
 	printk("%s: delayed func call\n", MODNAME);
 
-	if (ktime_before(data->elem->time, data->file->flush_time)) {
+	if (ktime_before(data->post_time, data->file->flush_time)) {
 		printk("%s: push should be aborted because of flush", MODNAME);
 	}
 
-	if (ktime_before(data->elem->time, data->ts->time)) {
+	if (ktime_before(data->post_time, data->ts->time)) {
 		printk("%s: push should be aborted because of revoke", MODNAME);
 	}
 
 	// Check if push was aborted in the meantime: if the message timestamp 
 	// comes after the last flush and last revoke push it to the queue
-	if (ktime_after(data->elem->time, data->file->flush_time) &&
-			ktime_after(data->elem->time, data->ts->time)) {
+	if (ktime_after(data->post_time, data->file->flush_time) &&
+			ktime_after(data->post_time, data->ts->time)) {
 		__push_to_queue(data->file, data->elem);
 		printk("%s: delayed push success\n", MODNAME);
 	} else {
@@ -321,6 +320,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 	struct session_data *s_data;
 	struct mq_message *elem;
 	struct delayed_write_data *data = NULL;
+	ktime_t curr_time = ktime_get();
 	bool ok;
 	ssize_t retval;
 
@@ -346,9 +346,10 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 
 	data->elem = elem;
 	data->file = d;
-	data->ts = s_data->ts;
 	// The timestamp will be referenced by another delayed work, acquire it
 	__acquire_timestamp(s_data->ts);
+	data->ts = s_data->ts;
+	data->post_time = curr_time;
 
 	INIT_HR_WORK_REL(data->hrwork, __delayed_work, s_data->send_timeout);
 	ok = queue_hr_work(&(d->work_queue), &(data->hrwork));
