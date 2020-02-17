@@ -190,7 +190,7 @@ static int dev_release(struct inode *inode, struct file *filp) {
 // Stores the message provided in buff inside a mq_message whose address is 
 // placed at elem_addr while keeping the count of the bytes stored in the device
 static ssize_t __write_common(struct file_data *d, const char *buff, size_t len, 
-							struct mq_message **elem_addr, bool delayed) {
+							struct mq_message **elem_addr) {
 	unsigned char *message;
 	long free_b, stored_b;
 	ssize_t retval;
@@ -260,7 +260,7 @@ static ssize_t dev_write(struct file *filp, const char *buff, size_t len,
 
 	printk("%s: write on [%d,%d]\n", MODNAME, MAJOR, __MINOR(filp));
 
-	retval = __write_common(d, buff, len, &elem, (bool) 0);
+	retval = __write_common(d, buff, len, &elem);
 
 	// Check if message storing failed for any reason
 	switch (retval) {
@@ -334,7 +334,7 @@ static ssize_t dev_write_timeout(struct file *filp, const char *buff,
 		goto exit;
 	}
 
-	retval = __write_common(d, buff, len, &elem, (bool) 1);
+	retval = __write_common(d, buff, len, &elem);
 	if (retval == -ENOMEM || retval == -ENOSPC)
 		goto exit; // Write failed to store the message
 	
