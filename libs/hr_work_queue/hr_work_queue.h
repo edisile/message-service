@@ -207,7 +207,7 @@ static bool queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 			atomic_long_set((atomic_long_t *) &(hrwq->next_wakeup), 
 							(long) work->time);
 			
-			while (!hr_work_queue_active(hrwq)) usleep_range(10, 50);
+			// while (!hr_work_queue_active(hrwq)) usleep_range(10, 50);
 			
 			hrtimer_start(&(hrwq->timer.timer), work->time, HRTIMER_MODE_ABS);
 			printk("hr_work_queue: timer restarted");
