@@ -93,8 +93,8 @@ static int MAJOR;
 #ifndef MINORS
 	#define MINORS 4
 #endif
-static atomic_long_t max_message_size = ATOMIC_LONG_INIT(512);
-static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(4096);
+static atomic_long_t max_message_size = ATOMIC_LONG_INIT(1 << 12); // 4KiB
+static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(1 << 22); // 4MiB
 static struct file_data files[MINORS];
 
 // Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is 
@@ -453,9 +453,12 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	if (IS_EMPTY(d->message_queue)) {
 		// Wait until either a signal comes...
 		wait_ret = wait_event_ordered_interruptible_hrtimeout(&(d->wait_queue), 
-				!IS_EMPTY(d->message_queue) || // ... queue is not empty...
-				(flushed = ktime_after(d->flush_time, entry_time)), // ... flush is requested...
-				entry_time, timeout); // ... or timeout expires
+				// ... queue is not empty...
+				!IS_EMPTY(d->message_queue) ||
+				// ... flush is requested...
+				(flushed = ktime_after(d->flush_time, entry_time)),
+				// ... or timeout expires
+				entry_time, timeout);
 	}
 
 	wakeup_time = ktime_get();

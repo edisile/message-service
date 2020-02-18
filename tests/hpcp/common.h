@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define CHUNK_SIZE (1 << 10)
+#define CHUNK_SIZE (1 << 12) // 4 KiB chunks
 
 struct chunk {
 	unsigned int index;
