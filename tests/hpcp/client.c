@@ -13,9 +13,7 @@
 
 int mfd, fd;
 pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
-unsigned char *fmap;
 unsigned long flen = 0;
-unsigned long map_size = 1 << 20;
 
 char terminate = 0;
 
@@ -39,51 +37,29 @@ void *client_thread_job(void *data) {
 
 		unsigned long off = c.index * CHUNK_SIZE;
 
-		if (off >= map_size) {
-			pthread_rwlock_wrlock(&rwlock);
-			
-			// Sync updates to the file
-			// if (msync(fmap, map_size, MS_SYNC) == -1) {
-			// 	__exit("msync fucked up");
-			// }
-			
-			while (off >= map_size) {
-				// printf("Doubling map size, now %lu\n", map_size * 2);
-				lseek(fd, map_size * 2, SEEK_SET);
-				write(fd, "\0", 1);
-				fmap = mremap(fmap, map_size, map_size * 2, MREMAP_MAYMOVE);
-				map_size *= 2; // Double map_size
-			}
-			pthread_rwlock_unlock(&rwlock);
-		}
-
-		pthread_rwlock_rdlock(&rwlock);
 		// printf("Reader copying to dest with offset %lu, current size %lu\n", off, map_size);
-		memcpy(&fmap[off], &c.bytes, c.len);
-		// printf("Reader copied\n");
+		pwrite(fd, &c.bytes, c.len, off);
 		__sync_fetch_and_add(&flen, c.len);
-		pthread_rwlock_unlock(&rwlock);
+		// printf("Reader copied\n");
 	}
 }
 
 int client(char *dest) {
 	char path[1024];
 	realpath(dest, (char *) &path);
+	char *path1 = strdup(path);
 	char *dir = dirname(path);
-	char *file = basename(path);
-	// free(path);
+	char *file = basename(path1);
+	free(path1);
 
 	if (chdir(path) != 0) {
 		__exit("Chdir failed");
 	}
 
-	fd = open(dest, O_RDWR | O_CREAT, 0664);
+	fd = open(file, O_RDWR | O_CREAT, 0664);
 	if (fd == -1) {
 		__exit("File open failed");
 	}
-
-	lseek(fd, map_size, SEEK_SET);
-	write(fd, "\0", 1);
 
 	mfd = open(MSG_DEV, O_RDONLY | O_CREAT);
 	if (mfd == -1) {
@@ -91,12 +67,6 @@ int client(char *dest) {
 	}
 
 	// ioctl(mfd, 10000, 10000); // Set recieve timeout at 0.01 seconds
-
-	// mmap the file
-	fmap = (unsigned char *) mmap(NULL, map_size, PROT_WRITE, MAP_SHARED, fd, 0);
-	if (fmap == MAP_FAILED) {
-		__exit("mmap failed");
-	}
 
 	for (int i = 0; i < C_THREADS; i++) {
 		// printf("Launch reader #%d\n", i);
