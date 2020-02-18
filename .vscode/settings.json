@@ -22,6 +22,12 @@
         "streambuf": "c",
         "type_traits": "c",
         "utility": "c",
-        "condition_variable": "c"
+        "condition_variable": "c",
+        "atomic": "c",
+        "fstream": "c",
+        "sstream": "c",
+        "stdlib.h": "c",
+        "pthread.h": "c",
+        "pthreadtypes.h": "c"
     }
 }
