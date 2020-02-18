@@ -152,11 +152,12 @@ static int daemon_work(void *hr_work_q) {
 		rcu_read_lock();
 		w = list_first_or_null_rcu(&(hrwq->list), struct hr_work, list);
 		if (w != NULL) {
-			hrwq->next_wakeup = w->time; // MAYBE: make atomic
-			__sync_synchronize(); // is this sufficient?
+			atomic_long_set((atomic_long_t *) &(hrwq->next_wakeup), 
+							(long) w->time);
 			hrtimer_start(&(hrwq->timer.timer), w->time, HRTIMER_MODE_ABS);
 		} else
-			hrwq->next_wakeup = KTIME_MAX;
+			atomic_long_set((atomic_long_t *) &(hrwq->next_wakeup), 
+							(long) KTIME_MAX);
 		rcu_read_unlock();
 	}
 }
@@ -203,8 +204,8 @@ static bool queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 		// Current work is more urgent, dearm and rearm the timer
 		if (hrtimer_try_to_cancel(&(hrwq->timer.timer)) >= 0) {
 			printk("hr_work_queue: timer cancelled");
-			hrwq->next_wakeup = work->time; // MAYBE: make atomic
-			__sync_synchronize(); // is this sufficient?
+			atomic_long_set((atomic_long_t *) &(hrwq->next_wakeup), 
+							(long) work->time);
 			
 			while (!hr_work_queue_active(hrwq)) usleep_range(10, 50);
 			

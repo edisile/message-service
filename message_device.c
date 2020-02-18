@@ -83,7 +83,7 @@ struct delayed_write_data {
 #define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, hrwork))
 
 // ioctl commands
-#define IOCTL_CODE 0x27 // 9984 as base
+#define IOCTL_CODE 0x27 // 0x2700 = 9984 as base
 #define SET_SEND_TIMEOUT _IOW(IOCTL_CODE, 0x0f, long) // 9984 + 15 = 9999
 #define SET_RECV_TIMEOUT _IOW(IOCTL_CODE, 0x10, long) // 9984 + 16 = 10000
 #define REVOKE_DELAYED_MESSAGES _IO(IOCTL_CODE, 0x11) // 9984 + 17 = 10001
@@ -105,14 +105,14 @@ module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 066
 
 
 // Macro to create a struct containing a driver instance
-#define DEFINE_DRIVER_INSTANCE(read_fp, write_fp) ((struct file_operations) { \
-	.owner = THIS_MODULE, \
-	.write = write_fp, \
-	.read = read_fp, \
-	.open =  dev_open, \
-	.release = dev_release, \
-	.unlocked_ioctl = dev_ioctl, \
-	.flush = dev_flush \
+#define DEFINE_DRIVER_INSTANCE(read_fp, write_fp) ((struct file_operations) {	\
+	.owner = THIS_MODULE,														\
+	.write = write_fp,															\
+	.read = read_fp,															\
+	.open =  dev_open,															\
+	.release = dev_release,														\
+	.unlocked_ioctl = dev_ioctl,												\
+	.flush = dev_flush															\
 })
 
 // A table that holds all the possible drivers; when adding a timeout for reads 
@@ -130,7 +130,8 @@ static struct file_operations f_ops[4] = {
 };
 
 // Get the index of the correct driver based on send and receive timeout values
-#define DRIVER_INDEX(st, rt) (((rt ? 0x1 : 0) | (st ? 0x2 : 0)))
+#define DRIVER_INDEX(st, rt) ((rt ? 0x1 : 0) | (st ? 0x2 : 0))
+
 
 // Helper functions for acquiring and releasing references to a session_data 
 // struct
@@ -487,7 +488,8 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 		
 		break;
 	default:
-		printk(KERN_ERR "%s: woke up with error %d; this shouldn't happen", MODNAME, wait_ret);
+		printk(KERN_ERR "%s: woke up with error %d; this shouldn't happen", 
+				MODNAME, wait_ret);
 		break;
 	}
 
@@ -548,8 +550,8 @@ static inline void __revoke(struct timestamp *ts, struct hr_work_queue *wq) {
 	struct hr_work *w;
 
 	// Start all work items whose struct timestamp pointer is the one of the 
-	// session and would have been valid at a time later than ts->time; works are 
-	// built as to auto-deallocate themselves if this happens
+	// session and would have been valid at a time later than ts->time; works 
+	// are built as to auto-deallocate themselves if this happens
 	start_work_if(wq, w, (dwd_from_work(w)->ts == ts) && 
 					ktime_after(w->time, ts->time));
 }
