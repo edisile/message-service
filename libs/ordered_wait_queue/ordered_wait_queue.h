@@ -13,10 +13,14 @@ struct ordered_wait_queue {
 	atomic_t population;
 };
 
+#define __SLEEPING 0
+#define __WOKEN_UP 1
+
 struct ordered_wait_queue_entry {
 	struct list_head list;
 	struct task_struct *tcb;
 	ktime_t ts;
+	atomic_t status;
 };
 
 #define init_ordered_wait_queue(owq) ({											\
@@ -59,8 +63,29 @@ static inline void ordered_queue_append(struct ordered_wait_queue *owq,
 }
 
 // Task removes its own ordered_wait_queue_entry from the queue
-static inline void ordered_queue_detach(struct ordered_wait_queue *owq, 
+static inline void __ordered_queue_detach(struct ordered_wait_queue *owq, 
 										struct ordered_wait_queue_entry *e) {
+	struct ordered_wait_queue_entry *f;
+
+	// Make sure current thread is the head of the list
+	for ( ; ; ) {
+		// printk("	thread %d trying to detach", current->pid);
+		
+		rcu_read_lock();
+		f = list_first_or_null_rcu(&(owq->list), 
+									struct ordered_wait_queue_entry, list);
+		rcu_read_unlock();
+
+		if (e == f) {
+			// printk("	thread %d detach success", current->pid);
+			break;
+		} else {
+			// printk("	thread %d detach sleep", current->pid);
+			usleep_range(10, 50); // Don't busy loop
+		}
+	}
+	
+	// The real detach
 	mutex_lock(&(owq->lock));
 	list_del_rcu(&(e->list));
 	mutex_unlock(&(owq->lock));
@@ -73,6 +98,7 @@ static inline void ordered_queue_detach(struct ordered_wait_queue *owq,
 	int wait_ret;																	\
 	e.ts = t;																		\
 	e.tcb = current;																\
+	atomic_set(&e.status, __SLEEPING);											\
 																					\
 	rcu_read_lock();																\
 	last = list_entry_rcu((owq)->list.prev, struct ordered_wait_queue_entry, list);	\
@@ -85,22 +111,30 @@ static inline void ordered_queue_detach(struct ordered_wait_queue *owq,
 																					\
 	rcu_read_unlock();																\
 																					\
-	printk("	thread %d went to sleep", current->pid);							\
+	/*printk("	thread %d went to sleep", current->pid);*/							\
 	wait_ret = wait_event_interruptible_hrtimeout((owq)->wq, condition, timeout);	\
-	printk("	thread %d woke up, reason %d", current->pid, wait_ret);				\
-	ordered_queue_detach(owq, &e);													\
+	__ordered_queue_detach(owq, &e);												\
+	printk("	thread %d woke up at %lld, reason %d, entered at %lld", 			\
+			current->pid, ktime_get(), wait_ret, e.ts);								\
 																					\
 	wait_ret;																		\
 })
 
 // Picks the first task from the queue (if not empty) and wakes it up
 static void inline wake_up_ordered(struct ordered_wait_queue *owq) {
-	struct ordered_wait_queue_entry *f;
+	struct ordered_wait_queue_entry *x;
+
 	rcu_read_lock();
-	f = list_first_or_null_rcu(&(owq->list), struct ordered_wait_queue_entry, list);
+	list_for_each_entry_rcu(x, &(owq->list), list) {
+		// Traverse list looking for the first node not yet woken up
+		if (atomic_cmpxchg(&(x->status), __SLEEPING, __WOKEN_UP) == __SLEEPING) {
+			wake_up_process(x->tcb);
+			break;
+		}
+		// If atomic_cmpxchg failed someone else already woke up that thread, 
+		// try to wake up the next one
+	}
 	rcu_read_unlock();
-	if (f != NULL) 
-		wake_up_process(f->tcb);
 }
 
 #define wake_up_ordered_all(owq) (wake_up_all(&((owq)->wq)))

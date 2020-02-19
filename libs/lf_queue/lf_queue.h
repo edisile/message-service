@@ -16,7 +16,7 @@
 
 struct lf_queue_node {
 	struct lf_queue_node *next;
-	int counter;
+	int refs;
 };
 
 struct lf_queue {
@@ -26,7 +26,7 @@ struct lf_queue {
 
 static void __cleanup(struct lf_queue_node *elem) {
 	// Make sure elem is clean
-	elem->counter = 0;
+	elem->refs = 0;
 	elem->next = NULL;
 }
 
@@ -52,14 +52,14 @@ static void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 	retry:
 	if (q->tail != NULL) {
 		prev = q->tail;
-		__atomic_inc(&(prev->counter));
+		__atomic_inc(&(prev->refs));
 	}
 	
 	ok = __atomic_swap(&(q->tail), prev, elem);
 	if (!ok) {
 		// Someone else took the last place, retry
 		if (prev != NULL)
-			__atomic_dec(&(prev->counter));
+			__atomic_dec(&(prev->refs));
 		goto retry;
 	}
 
@@ -68,7 +68,7 @@ static void lf_queue_push(struct lf_queue *q, struct lf_queue_node *elem) {
 	if (prev != NULL) {
 		// Old tail was a real node, attach elem to it
 		prev->next = elem;
-		__atomic_dec(&(prev->counter));
+		__atomic_dec(&(prev->refs));
 	} else {
 		// Old tail was NULL, the queue was empty
 		q->head = elem;
@@ -87,15 +87,15 @@ static struct lf_queue_node *lf_queue_pull(struct lf_queue *q) {
 	
 	head_is_tail = (q->head == q->tail);
 	elem = q->head;
-	__atomic_inc(&(elem->counter));
+	__atomic_inc(&(elem->refs));
 	ok = __atomic_swap(&(q->head), elem, elem->next);
 	if (!ok) {
 		// Someone pulled this node already, retry
-		__atomic_dec(&(elem->counter));
+		__atomic_dec(&(elem->refs));
 		goto retry;
 	}
 	
-	while (elem->counter > 1) {
+	while (elem->refs > 1) {
 		__sleep_range(__SLEEP_MIN, __SLEEP_MAX);
 		// Give others time to leave this node alone
 	}
