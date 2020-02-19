@@ -71,4 +71,6 @@ int server(char *orig) {
 	for (int i = 0; i < S_THREADS; i++) {
 		pthread_join(s_thread_data[i], NULL);
 	}
+
+	return 0;
 }

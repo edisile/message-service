@@ -31,8 +31,8 @@ int main(int argc, char const *argv[]) {
 		case -1:
 			__exit("Fork failed");
 		case 0:
-			return server(orig);
-		default:
 			return client(dest);
+		default:
+			return server(orig);
 	}
 }

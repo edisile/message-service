@@ -439,7 +439,7 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 
 	printk("%s: thread %d read with timeout %lldns", MODNAME, current->pid, timeout);
 
-	retry:	
+	retry:
 	// Compute remaining time to wait in case multiple wake-ups happen:
 	// timeout = timeout - (wakeup_time - entry_time)
 	timeout = ktime_sub(timeout, ktime_sub(wakeup_time, entry_time));
