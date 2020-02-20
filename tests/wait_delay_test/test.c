@@ -16,11 +16,11 @@ int mfd;
 #endif
 
 #ifndef SEND_DELAY
-	#define SEND_DELAY 50000
+	#define SEND_DELAY 500000
 #endif
 
 #ifndef RECV_DELAY
-	#define RECV_DELAY 200000
+	#define RECV_DELAY 1000000
 #endif
 
 void *thread_job(void *data) {
@@ -67,23 +67,30 @@ int main(int argc, char const *argv[]) {
 		// usleep(100);
 	}
 
-	#ifndef WAIT
-		// Unblock the waiting readers
-		for (int i = 0; i < THREADS; i++) {
-			// printf("Writing\n");
-			sprintf(message, "%d", i);
-			int w = write(mfd, message, strlen(message));
-
-			if (w <= 0) {
-				perror("Write failed");
-			}
-		}
-	#endif
-
+	// Unblock the waiting readers
 	for (int i = 0; i < THREADS; i++) {
-		pthread_join(thread_data[i], NULL);
-		// printf("Thread #%d ended\n", i);
+		// printf("Writing\n");
+		sprintf(message, "%d", i);
+		int w = write(mfd, message, strlen(message));
+
+		if (w <= 0) {
+			perror("Write failed");
+		}
 	}
 
-	return 0;
+	#ifdef REVOKE
+	ioctl(mfd, 10001); // Revoke messages
+	#endif
+
+	#ifndef DONT_WAIT
+	for (int i = 0; i < THREADS; i++) {
+		pthread_join(thread_data[i], NULL);
+	}
+	#endif
+
+	#ifdef DONT_WAIT
+	usleep(300000);
+	#endif
+
+	return close(mfd);
 }

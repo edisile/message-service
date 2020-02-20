@@ -466,14 +466,15 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 
 	switch (wait_ret) {
 	case 0:
-		// Condition has become true, try to read
-		retval = __read_common(d, buff, len, off);
+		if (!flushed) {
+			// Condition has become true, try to read
+			retval = __read_common(d, buff, len, off);
 
-		if (retval == 0 && !flushed) {
-			goto retry; // Someone else stole the message, try to sleep again
+			if (retval == 0)
+				goto retry; // Someone stole the message, try to sleep again
 		} else {
-			// Successful read or flush, return
-			if (flushed) printk("%s: woke up because of flush", MODNAME);
+			printk("%s: woke up because of flush", MODNAME);
+			retval = -EAGAIN;
 		}
 		break;
 	case -ETIME:
