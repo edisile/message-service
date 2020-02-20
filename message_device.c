@@ -18,7 +18,6 @@
 
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
-#define EXPORT_SYMTAB
 #define MODNAME "Messages system"
 #define DEVICE_NAME "message-dev"
 
