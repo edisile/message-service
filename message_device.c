@@ -62,8 +62,6 @@ struct session_data {
 	atomic_t refs;
 };
 
-#define __void_ptr_to_s_data_ptr(p) ((struct session_data *) p)
-
 // Data related to a single instance of the file
 struct file_data {
 	struct lf_queue message_queue;
@@ -82,7 +80,10 @@ struct delayed_write_data {
 	ktime_t post_time;
 };
 
-#define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, hrwork))
+#define dwd_from_work(_work) (container_of(_work, struct delayed_write_data, \
+											hrwork))
+
+
 
 // ioctl commands
 #define IOCTL_CODE 0x27 // 0x2700 = 9984 as base
@@ -90,20 +91,24 @@ struct delayed_write_data {
 #define SET_RECV_TIMEOUT _IOW(IOCTL_CODE, 0x10, long) // 9984 + 16 = 10000
 #define REVOKE_DELAYED_MESSAGES _IO(IOCTL_CODE, 0x11) // 9984 + 17 = 10001
 
+
 // Globals
 static int MAJOR;
 #ifndef MINORS
 	#define MINORS 4
 #endif
-static atomic_long_t max_message_size = ATOMIC_LONG_INIT(1 << 12); // 4KiB
+static atomic_long_t max_message_size = ATOMIC_LONG_INIT(1 << 10); // 1KiB
 static atomic_long_t max_storage_size = ATOMIC_LONG_INIT(1 << 22); // 4MiB
 static struct file_data files[MINORS];
+
 
 // Module parameters exposed via the /sys/ pseudo-fs; atomic_long_param_ops is 
 // a custom kernel_param_ops struct that implements a atomic set on variables 
 // of atomic_long_t type
-module_param_cb(max_message_size, &atomic_long_param_ops, &max_message_size, 0664);
-module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 0664);
+module_param_cb(max_message_size, &atomic_long_param_ops, &max_message_size, 
+				0664);
+module_param_cb(max_storage_size, &atomic_long_param_ops, &max_storage_size, 
+				0664);
 
 
 // Macro to create a struct containing a driver instance
@@ -143,7 +148,7 @@ static struct file_operations f_ops[4] = {
 static inline struct session_data *__acquire_s_data(void *ptr) {
 	struct session_data *s_data = NULL;
 
-	s_data = __void_ptr_to_s_data_ptr(ptr);
+	s_data = (struct session_data *) ptr;
 	if (s_data != NULL) {
 		atomic_inc(&(s_data->refs));
 	}
@@ -170,7 +175,7 @@ static int dev_open(struct inode *inode, struct file *filp) {
 
 // Closes an I/O session towards the device
 static int dev_release(struct inode *inode, struct file *filp) {
-	struct session_data *s_data = __void_ptr_to_s_data_ptr(filp->private_data);
+	struct session_data *s_data = (struct session_data *) filp->private_data;
 
 	// s_data might have not been created for this structure
 	if (s_data != NULL) {
