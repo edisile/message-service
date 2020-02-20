@@ -11,7 +11,7 @@ static const struct kernel_param_ops atomic_long_param_ops = {
 };
 
 static int param_atomic_long_set(const char *val, const struct kernel_param *kp) {
-	long v; // Value for the parameter
+	long v = -1; // Value for the parameter
 	char c; // Measurement unit, if provided
 	int ret;
 

@@ -32,8 +32,7 @@ void *server_thread_job(void *data) {
 				// fprintf(stderr, "Error %d", errno);
 				__exit("Write fucked up");
 			} else {
-				// printf("writer sleeping for a sec\n");
-				usleep(1000000);
+				usleep(100000);
 				goto retry;
 			}
 		} 

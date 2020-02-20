@@ -14,8 +14,8 @@
 int mfd, fd;
 pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
 unsigned long flen = 0;
-
-char terminate = 0;
+unsigned long received = 0;
+unsigned long last = -2;
 
 #define C_THREADS 5
 pthread_t c_thread_data[C_THREADS];
@@ -24,7 +24,7 @@ void *client_thread_job(void *data) {
 	struct chunk c;
 	// printf("Reader thread started\n");
 
-	while (!terminate) {
+	while (received != last + 1) {
 		int r = read(mfd, &c, sizeof(struct chunk));
 
 		if (r <= 0) continue;
@@ -32,7 +32,8 @@ void *client_thread_job(void *data) {
 		// printf("Read %dB from device\n", r);
 
 		if (c.len < CHUNK_SIZE) {
-			__sync_fetch_and_add(&terminate, (char) 1);
+			// This is the last chunk
+			__atomic_store_n(&last, c.index, __ATOMIC_RELAXED);
 		}
 
 		unsigned long off = c.index * CHUNK_SIZE;
@@ -40,6 +41,8 @@ void *client_thread_job(void *data) {
 		// printf("Reader copying to dest with offset %lu, current size %lu\n", off, map_size);
 		pwrite(fd, &c.bytes, c.len, off);
 		__sync_fetch_and_add(&flen, c.len);
+
+		__sync_fetch_and_add(&received, 1);
 		// printf("Reader copied\n");
 	}
 
@@ -57,7 +60,7 @@ int client(char *dest) {
 		__exit("Open failed");
 	}
 
-	// ioctl(mfd, 10000, 10000); // Set recieve timeout at 0.01 seconds
+	ioctl(mfd, 10000, 10000); // Set recieve timeout at 0.01 seconds
 
 	for (int i = 0; i < C_THREADS; i++) {
 		// printf("Launch reader #%d\n", i);
