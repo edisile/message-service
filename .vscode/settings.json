@@ -29,6 +29,7 @@
         "stdlib.h": "c",
         "pthread.h": "c",
         "pthreadtypes.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "lf_queue.h": "c"
     }
 }

@@ -14,6 +14,8 @@
 #include "libs/ordered_wait_queue/ordered_wait_queue.h"
 #include "libs/hr_work_queue/hr_work_queue.h"
 
+
+
 MODULE_AUTHOR("Eduard Manta");
 MODULE_LICENSE("GPL");
 #define EXPORT_SYMTAB
@@ -213,7 +215,8 @@ static ssize_t __write_common(struct file_data *d, const char *buff, size_t len,
 				MODNAME, len, free_b);
 		return -ENOSPC;
 	}
-	if (atomic_long_cmpxchg(&(d->stored_bytes), stored_b, stored_b + len) != stored_b)
+	if (atomic_long_cmpxchg(&(d->stored_bytes), stored_b, stored_b + len) != 
+			stored_b)
 		goto retry;
 
 	// Allocate memory for the message
@@ -409,8 +412,11 @@ static ssize_t __read_common(struct file_data *d, char *buff, size_t len,
 // Read a message from the queue; if none is available returns immediately
 static ssize_t dev_read(struct file *filp, char *buff, size_t len, 
 						loff_t *off) {
-
-	return __read_common(&files[__MINOR(filp)], buff, len, off);
+	
+	if (buff != NULL)
+		return __read_common(&files[__MINOR(filp)], buff, len, off);
+	else
+		return -EINVAL;
 }
 
 // Read a message from the queue; if none is available wait for a time related 
@@ -430,14 +436,15 @@ static ssize_t dev_read_timeout(struct file *filp, char *buff, size_t len,
 	s_data = __acquire_s_data(filp->private_data);
 	if (s_data == NULL) {
 		// Someone closed the file concurrently to the read call
-		printk("%s: ts access from NULL s_data pointer", MODNAME);
+		printk("%s: NULL s_data pointer", MODNAME);
 		return -EBADFD;
 	}
 
 	entry_time = wakeup_time = ktime_get();
 	timeout = s_data->recv_timeout;
 
-	printk("%s: thread %d read with timeout %lldns", MODNAME, current->pid, timeout);
+	printk("%s: thread %d read with timeout %lldns", MODNAME, current->pid, 
+			timeout);
 
 	retry:
 	// Compute remaining time to wait in case multiple wake-ups happen:
@@ -598,7 +605,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 			printk("%s: trying to start hr_work_queue", MODNAME);
 			start_hr_work_queue(&(d->work_queue));
 		}
-		// There's still need to set the timeout and timer, so...
+		// There's still need to set the timeout and timer, so this case must...
 		// fall through
 	case _IOC_NR(SET_RECV_TIMEOUT):
 		mutex_lock(&(s_data->metadata_lock));
@@ -631,14 +638,11 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
 // Real flush implementation, just set the flush timestamp and wake all waiting 
 // threads; all the delayed operations will flush their messages when they will 
-// execute and delayed messages on the queue will be flushed upon read
+// execute
 static void __flush(struct file_data *d) {
 	ktime_t old_flush; // Old flush time
 	ktime_t now = ktime_get();
 	struct hr_work *w;
-
-	// Start all work items whose struct timestamp pointer is the one of the 
-	// session and would have been valid at a time later than ts->time
 
 	retry:
 	printk("%s: setting flush timestamp to %lld\n", MODNAME, now);
@@ -648,18 +652,17 @@ static void __flush(struct file_data *d) {
 								old_flush, now) != old_flush)
 			goto retry; // Someone else changed the value, retry for safety
 	
-	wake_up_ordered_all(&(d->wait_queue));
+	wake_up_ordered_all(&(d->wait_queue)); // Wake up all waiting readers
 
 	// Start all work items that would have been valid at a time later than the 
 	// current flush time; works are built as to auto-deallocate themselves if 
 	// this happens
 	printk("%s: flushing the workqueue\n", MODNAME);
 	start_work_if(&(d->work_queue), w, ktime_after(w->time, d->flush_time));
-	
 }
 
 // Revoke all messages not yet pushed to the queue and wake up all waiting 
-// readers; the exported VFS operation is just an wrapper for __flush
+// readers; the exposed VFS operation is just an wrapper for __flush
 static int dev_flush(struct file *filp, void *id) {
 	__flush(&files[__MINOR(filp)]);
 
@@ -705,8 +708,8 @@ void cleanup_module(void) {
 
 	// Flush all files; sets all delayed work to flush their messages and wakes 
 	// up any readers that are still waiting
-	printk("%s: flushing work queue\n", MODNAME);
 	for (i = 0; i < MINORS; i++) {
+		printk("%s: flushing device #%d\n", MODNAME, i);
 		__flush(&(files[i]));
 	}
 

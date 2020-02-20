@@ -103,13 +103,28 @@ struct hr_work {
 	rcu_read_unlock();													\
 })
 
+// Execute all hr_work on the thread making the call
+#define execute_all_work(hrwq, work_ptr) ({								\
+	rcu_read_lock();													\
+	list_for_each_entry_rcu(work_ptr, &((hrwq)->list), list) {			\
+		mutex_lock(&((hrwq)->lock));									\
+		list_del_rcu(&(work_ptr->list));								\
+		mutex_unlock(&((hrwq)->lock));									\
+		printk("hr_work_queue: executing work with time %lld at %lld",	\
+				work_ptr->time, ktime_get());							\
+		/* Execute work locally */										\
+		work_ptr->work.func(&(work_ptr->work));							\
+	}																	\
+	rcu_read_unlock();													\
+})
+
 // Stop the hr_work_queue: cancel the timer, kill the daemon then start all 
 // residual works in the queue
 #define destroy_hr_work_queue(wq) ({ \
-	struct hr_work *w;														\
-	hrtimer_cancel(&(wq.timer.timer));										\
-	kthread_stop(wq.daemon);												\
-	start_work_if(&wq, w, 1);												\
+	struct hr_work *w;													\
+	hrtimer_cancel(&(wq.timer.timer));									\
+	kthread_stop(wq.daemon);											\
+	execute_all_work(&wq, w); /* Clear the rest of the work */			\
 })
 
 // Daemon work
