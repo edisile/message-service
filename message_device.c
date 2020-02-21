@@ -574,6 +574,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	long retval = 0;
 	struct session_data *s_data;
 	struct file_data *d = &files[__MINOR(filp)];
+	struct task_struct *wq_daemon;
 
 	printk("%s: called with cmd %u and arg %lu", MODNAME, cmd, arg);
 
@@ -607,7 +608,13 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		// daemon thread
 		if (!hr_work_queue_active(&(d->work_queue))) {
 			printk("%s: trying to start hr_work_queue", MODNAME);
-			start_hr_work_queue(&(d->work_queue));
+			wq_daemon = start_hr_work_queue(&(d->work_queue));
+
+			if ((long) wq_daemon == -ENOMEM) {
+				// forking the daemon failed
+				retval = -EAGAIN;
+				goto exit;
+			}
 		}
 		// There's still need to set the timeout and timer, so this case must...
 		// fall through
@@ -626,6 +633,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		filp->f_op = &f_ops[DRIVER_INDEX(s_data->send_timeout, s_data->recv_timeout)];
 
 		mutex_unlock(&(s_data->metadata_lock));
+
 		break;
 	case _IOC_NR(REVOKE_DELAYED_MESSAGES):
 		atomic_long_set((atomic_long_t *) &(s_data->ts->time), ktime_get());
@@ -634,6 +642,7 @@ static long dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		break;
 	}
 
+	exit:
 	// Release the acquired reference
 	__release_s_data(s_data);
 

@@ -239,6 +239,8 @@ static bool queue_hr_work(struct hr_work_queue *hrwq, struct hr_work *work) {
 	if (!hr_work_queue_active(wq)) {									\
 		printk("hr_work_queue: starting");								\
 		tsk = kthread_run(daemon_work, wq, "hr_q_worker");				\
+		if (tsk == -ENOMEM)	printk("hr_work_queue: can't start");		\
 	}																	\
 	mutex_unlock(&((wq)->lock));										\
+	tsk;																\
 })
