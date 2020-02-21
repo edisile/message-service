@@ -17,7 +17,9 @@ unsigned long flen = 0;
 unsigned long received = 0;
 unsigned long last = -2;
 
-#define C_THREADS 5
+#ifndef C_THREADS
+	#define C_THREADS 5
+#endif
 pthread_t c_thread_data[C_THREADS];
 
 void *client_thread_job(void *data) {

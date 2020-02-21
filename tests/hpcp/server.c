@@ -10,7 +10,9 @@ unsigned long len;
 int mfd;
 unsigned long chunk_ind = 0;
 
-#define S_THREADS 5
+#ifndef S_THREADS
+	#define S_THREADS 5
+#endif
 pthread_t s_thread_data[S_THREADS];
 
 #define min(x, y) (x < y ? x : y)
