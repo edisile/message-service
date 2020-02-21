@@ -60,7 +60,7 @@ int client(char *dest) {
 		__exit("Open failed");
 	}
 
-	ioctl(mfd, 10000, 10000); // Set recieve timeout at 0.01 seconds
+	//ioctl(mfd, 10000, 10000); // Set recieve timeout at 0.01 seconds
 
 	for (int i = 0; i < C_THREADS; i++) {
 		// printf("Launch reader #%d\n", i);

@@ -89,8 +89,16 @@ int main(int argc, char const *argv[]) {
 	#endif
 
 	#ifdef DONT_WAIT
-	usleep(300000);
+	usleep(500000);
 	#endif
 
-	return close(mfd);
+	close(mfd);
+
+	#ifdef DONT_WAIT
+	for (int i = 0; i < THREADS; i++) {
+		pthread_join(thread_data[i], NULL);
+	}
+	#endif
+
+	return 0;
 }
