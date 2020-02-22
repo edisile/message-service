@@ -1,0 +1,21 @@
+# message-service Linux device file
+
+This is the project assigned for the 2019/2020 Advanced Operating Systems course at the University of Rome Tor Vergata, requiring to implement a Linux char-device driver that would allow exchanging messages among writers and readers of a file instance in a concurrency safe fashion, while also providing mechanisms for either blocking or non-blocking reads when the device has no messages stored and either immediate or delayed message storing. Further details about the specification are available [here](https://francescoquaglia.github.io/TEACHING/AOS/PROJECTS/project-specification-2019-2020.html).
+
+## The implementation
+
+### Normal operating mode
+
+Access to the messaging service can only be done by opening an I/O session towards an instance of the device file; the defaults for a newly opened session are immediately storing writes and non-blocking reads. Messages are stored as independent data units in a lock-free queue and read in FIFO order; requesting a read with less bytes than the length of the first standing message in the queue fully invalidates the rest of the message that won't be accessible anymore. The device allows to tune the maximum message length and maximum storage size as kernel module parameters exposed via the /sys pseudo-fs; write operations posting messages whose size exceeds the maximum allowed length or wouldn't fit within the set maximum storage size return with an error code.
+
+### Blocking reads operating mode
+
+I/O sessions can be set to block up to a certain timeout (expressed in microseconds) during a read request when no messages are available to be delivered. The wait is interruptible by either a signal to the waiting thread, a new message being stored or a flush operation being called on the device file instance the waiter is reading from; if the thread is woken up by the arrival of a message it will attempt to read it, going back to sleep for the remaining wait time if the message was already read by others. If multiple threads are currently waiting, they are woken up in FIFO order upon message storing. This FIFO guarantee is achieved by using a data structure named ordered_wait_queue what serves as a wrapper for a Linux wait_queue, as the latter wakes up non-exclusive waiting threads in LIFO order for performance reasons.
+
+### Delayed message storing operating mode
+
+I/O sessions can also be set up to make the message deliverable after a certain delay (expressed in microseconds). Delayed messages written via an I/O session that have not yet been stored — and thus aren't deliverable — can be revoked via an ioctl call with code 10001; a flush request will have the same effect (along with waking up all waiting readers) but will revoke delayed messages for ALL the I/O sessions. Delayed storing is done using a structure named hr_work_queue, a wrapper for the Linux work_queue API that allows to execute deferred work with fine-grain delays compared to the provided API that only supports delays in jiffies; the hr_work_queue is backed by an ordered list of work_struct items, each with an execution time (declared as an absolute timestamp of the monotonic system clock), and a daemon thread that pushes to system_unbound_wq all work items whose execution time has passed. The hr_work_queue daemon is activated by an hrtimer_sleeper only at the moment in time the first work item in the queue should be executed. The work items related to message posting check when executed whether the message has been revoked or not; in the latter case, the message gets posted to the deliverable messages queue and a waiting readers gets notified.
+
+### ioctl and device driver switching
+
+An I/O sessions' operating mode can be changed to a combination of the either two read and write modes by using ioctl calls; this affects the f_op pointer in the file struct associated with the I/O session, making it point at a different file_operations struct instance in which the pointers to the read/write implementations point to a different implementation for the operation. Changing the write delay or read timeout can be done with an ioctl call with, respectively, request code 9999 or 10000 and, again respectively, the store delay or wait time as an argument.
